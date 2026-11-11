@@ -38,6 +38,7 @@ type GitHub interface {
 	AddItem(ctx context.Context, projectID, contentNodeID string) (string, error)
 	SetSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error
 	ClearField(ctx context.Context, projectID, itemID, fieldID string) error
+	LastStatusChange(ctx context.Context, issueNodeID, projectID string) (*github.StatusChange, error)
 }
 
 // Engine syncs requirements and issues.

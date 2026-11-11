@@ -69,12 +69,25 @@ type ghView struct {
 	typeView string
 }
 
-func (e *Engine) view(p *mapping.Project, is *github.Issue, item *github.Item) *ghView {
+func (e *Engine) view(ctx context.Context, p *mapping.Project, is *github.Issue, item *github.Item, last state.Snapshot, log *slog.Logger) *ghView {
 	v := &ghView{issue: is, item: item}
 	if item != nil && p.Fields != nil {
 		if s := p.Fields.Status; s != nil {
 			fv := item.Values[s.Field]
-			v.status, v.statusBy, v.statusAt = fv.Option, fv.Creator, fv.UpdatedAt
+			v.status, v.statusAt = fv.Option, fv.UpdatedAt
+			// Who moved the card is only in the issue's timeline: read it when the card moved.
+			if v.status != last.GHStatus && v.status != "" {
+				sc, err := e.gh.LastStatusChange(ctx, is.NodeID, p.GithubProject)
+				switch {
+				case err != nil:
+					log.Warn("cannot read who moved the card", "error", err)
+				case sc != nil && sc.Status == v.status:
+					v.statusBy = sc.Actor
+					if sc.CreatedAt.After(v.statusAt) {
+						v.statusAt = sc.CreatedAt
+					}
+				}
+			}
 		}
 		if pr := p.Fields.Priority; pr != nil {
 			fv := item.Values[pr.Field]
@@ -276,7 +289,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	if err != nil {
 		return err
 	}
-	v := e.view(p, is, item)
+	v := e.view(ctx, p, is, item, l.Last, log)
 	last := l.Last
 	next := last
 	issueUpd := github.IssueInput{}

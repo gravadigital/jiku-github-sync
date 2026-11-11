@@ -208,3 +208,52 @@ func (c *Client) ClearField(ctx context.Context, projectID, itemID, fieldID stri
 	q := `mutation($p:ID!,$i:ID!,$f:ID!){clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f}){projectV2Item{id}}}`
 	return c.graphql(ctx, q, map[string]any{"p": projectID, "i": itemID, "f": fieldID}, nil, false)
 }
+
+// StatusChange is the last change of an issue's Status in a Project, from the issue's timeline.
+// It is the only place GitHub says WHO moved a card: an item field value's `creator` is whoever
+// set it first and does not change on later edits.
+type StatusChange struct {
+	Actor     string
+	Status    string
+	CreatedAt time.Time
+}
+
+// LastStatusChange returns the most recent Status change of the issue in projectID, or nil.
+func (c *Client) LastStatusChange(ctx context.Context, issueNodeID, projectID string) (*StatusChange, error) {
+	var out struct {
+		Node *struct {
+			TimelineItems struct {
+				Nodes []struct {
+					CreatedAt time.Time `json:"createdAt"`
+					Status    string    `json:"status"`
+					Actor     *struct {
+						Login string `json:"login"`
+					} `json:"actor"`
+					Project *struct {
+						ID string `json:"id"`
+					} `json:"project"`
+				} `json:"nodes"`
+			} `json:"timelineItems"`
+		} `json:"node"`
+	}
+	q := `query($id:ID!){node(id:$id){... on Issue{timelineItems(last:25,itemTypes:[PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]){nodes{... on ProjectV2ItemStatusChangedEvent{createdAt status actor{login} project{id}}}}}}}`
+	if err := c.graphql(ctx, q, map[string]any{"id": issueNodeID}, &out, false); err != nil {
+		return nil, err
+	}
+	if out.Node == nil {
+		return nil, nil
+	}
+	ns := out.Node.TimelineItems.Nodes
+	for i := len(ns) - 1; i >= 0; i-- {
+		n := ns[i]
+		if n.Project == nil || n.Project.ID != projectID {
+			continue
+		}
+		sc := &StatusChange{Status: n.Status, CreatedAt: n.CreatedAt}
+		if n.Actor != nil {
+			sc.Actor = n.Actor.Login
+		}
+		return sc, nil
+	}
+	return nil, nil
+}

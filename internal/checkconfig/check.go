@@ -102,6 +102,7 @@ func project(ctx context.Context, gh GitHub, p *mapping.Project) []Finding {
 					unmapped = append(unmapped, t)
 				}
 			}
+			add(OK, "issue types de %s: %v", org, types)
 			if len(unmapped) > 0 {
 				add(Warn, "issue types de %s sin mapeo (entran como 'otro' salvo que un label los mapee): %v", org, unmapped)
 			}

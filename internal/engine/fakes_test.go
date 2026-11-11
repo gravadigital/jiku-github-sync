@@ -45,11 +45,13 @@ type fakeGH struct {
 	automationStatus string
 	writes           []string
 	issueTypes       map[string]bool // nil = every type accepted
+	// statusLog is the issue timeline of Status changes (node -> changes).
+	statusLog map[string][]github.StatusChange
 }
 
 func newFakeGH(clk *clock) *fakeGH {
 	return &fakeGH{clk: clk, issues: map[string]*github.Issue{}, comms: map[string][]*github.Comment{},
-		items: map[string]*github.Item{}, nextNum: map[string]int{}, nextID: 1000}
+		items: map[string]*github.Item{}, nextNum: map[string]int{}, nextID: 1000, statusLog: map[string][]github.StatusChange{}}
 }
 
 func (f *fakeGH) write(s string, a ...any) { f.writes = append(f.writes, fmt.Sprintf(s, a...)) }
@@ -104,7 +106,16 @@ func (f *fakeGH) setField(node, field, option, by string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	it := f.items[node]
-	it.Values[field] = github.FieldValue{Option: option, UpdatedAt: f.clk.tick(), Creator: by}
+	at := f.clk.tick()
+	// Like GitHub: the value's creator is whoever set it FIRST.
+	creator := it.Values[field].Creator
+	if creator == "" {
+		creator = by
+	}
+	it.Values[field] = github.FieldValue{Option: option, UpdatedAt: at, Creator: creator}
+	if field == "Status" {
+		f.statusLog[node] = append(f.statusLog[node], github.StatusChange{Actor: by, Status: option, CreatedAt: at})
+	}
 }
 
 func (f *fakeGH) comment(node, author, body string) *github.Comment {
@@ -194,7 +205,9 @@ func (f *fakeGH) UpdateIssue(_ context.Context, repo string, n int, in github.Is
 		// The "Item closed" workflow.
 		if is.State == "closed" {
 			if it := f.items[is.NodeID]; it != nil && f.schema != nil {
-				it.Values["Status"] = github.FieldValue{Option: "Done", UpdatedAt: f.clk.tick(), Creator: AutomationLogin}
+				at := f.clk.tick()
+				it.Values["Status"] = github.FieldValue{Option: "Done", UpdatedAt: at, Creator: AutomationLogin}
+				f.statusLog[is.NodeID] = append(f.statusLog[is.NodeID], github.StatusChange{Actor: AutomationLogin, Status: "Done", CreatedAt: at})
 			}
 		}
 	}
@@ -285,7 +298,9 @@ func (f *fakeGH) AddItem(_ context.Context, _ string, node string) (string, erro
 	}
 	it := &github.Item{ID: "ITEM_" + node, ContentNodeID: node, Values: map[string]github.FieldValue{}}
 	if f.automationStatus != "" {
-		it.Values["Status"] = github.FieldValue{Option: f.automationStatus, UpdatedAt: f.clk.tick(), Creator: AutomationLogin}
+		at := f.clk.tick()
+		it.Values["Status"] = github.FieldValue{Option: f.automationStatus, UpdatedAt: at, Creator: AutomationLogin}
+		f.statusLog[node] = append(f.statusLog[node], github.StatusChange{Actor: AutomationLogin, Status: f.automationStatus, CreatedAt: at})
 	}
 	f.items[node] = it
 	f.write("add item")
@@ -310,9 +325,17 @@ func (f *fakeGH) SetSelect(_ context.Context, _, itemID, fieldID, optID string) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	field, name := f.optionName(fieldID, optID)
-	for _, it := range f.items {
+	for node, it := range f.items {
 		if it.ID == itemID {
-			it.Values[field] = github.FieldValue{Option: name, UpdatedAt: f.clk.tick(), Creator: "connector"}
+			at := f.clk.tick()
+			creator := it.Values[field].Creator
+			if creator == "" {
+				creator = "connector"
+			}
+			it.Values[field] = github.FieldValue{Option: name, UpdatedAt: at, Creator: creator}
+			if field == "Status" {
+				f.statusLog[node] = append(f.statusLog[node], github.StatusChange{Actor: "connector", Status: name, CreatedAt: at})
+			}
 			f.write("set %s=%s", field, name)
 			return nil
 		}
@@ -547,3 +570,14 @@ type (
 	jikuComment = jiku.Comment
 	jikuNew     = jiku.NewRequirement
 )
+
+func (f *fakeGH) LastStatusChange(_ context.Context, node, _ string) (*github.StatusChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l := f.statusLog[node]
+	if len(l) == 0 {
+		return nil, nil
+	}
+	c := l[len(l)-1]
+	return &c, nil
+}

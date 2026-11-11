@@ -1,0 +1,50 @@
+# jiku-github-sync next to Jiku's local stack.
+#
+# Requirements: Jiku's stack running (jiku/deploy/local.sh up), which creates the
+# `jiku-local_jiku` network, NATS with the auth-callout and the JIKU_KV space. This compose
+# touches nothing of Jiku.
+#
+#   cp .env.dist .env                  # fill in the identity and bus settings
+#   mkdir -p .local && cp config.example.yaml .local/config.yaml   # and adapt it
+#   # the machine user key goes in .local/ too (never committed)
+#   export GITHUB_TOKEN=...            # passed through from the shell, never written to disk
+#   docker compose -f docker-compose.local.yml up -d --build
+#
+# The whole SYNC_CONFIG_DIR is mounted (not the single file) so that editing config.yaml on the
+# host reaches the container and the hot reload picks it up.
+#
+# Host port: 8095 -> /healthz, /readyz and /webhooks/github.
+
+name: jiku-github-sync-local
+
+services:
+  jiku-github-sync:
+    build:
+      context: .
+      args:
+        VERSION: local
+    image: gravadigital/jiku-github-sync:local
+    container_name: jiku-github-sync-local
+    # Runs with the host uid: Jiku's sentinel creds and the key are 0600, owned by the host user.
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    env_file: .env
+    environment:
+      - GITHUB_TOKEN
+      - GITHUB_WEBHOOK_SECRET
+      - JIKU_SERVERS=nats://nats:4222
+      - JIKU_CREDS=/run/secrets/nats.creds
+      - JIKU_KEY_FILE=/etc/jiku-github-sync/${SYNC_KEY_FILE_NAME:-jiku_github_sync.key.json}
+      - SYNC_CONFIG=/etc/jiku-github-sync/config.yaml
+    volumes:
+      - ${JIKU_DEPLOY_DIR:-../../jiku/deploy}/nats/creds/sentinel-client.creds:/run/secrets/nats.creds:ro
+      - ${SYNC_CONFIG_DIR:-./.local}:/etc/jiku-github-sync:ro
+    ports:
+      - "127.0.0.1:8095:8080"
+    restart: unless-stopped
+    networks:
+      - jiku
+
+networks:
+  jiku:
+    external: true
+    name: jiku-local_jiku

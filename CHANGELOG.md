@@ -30,5 +30,14 @@ lint and the tests, and only then publishes `gravadigital/jiku-github-sync` to D
 
 ### Added
 
-- Repository skeleton: Go module, `serve` / `healthcheck` / `version` commands, `/healthz` and
-  `/readyz`, distroless Docker image and CI (`ci.yml`, `dev-images.yml`, `release.yml`).
+- Repository skeleton: Go module, distroless Docker image, CI (`ci.yml`, `dev-images.yml`,
+  `release.yml`) and `docker-compose.local.yml` to run next to Jiku's local stack.
+- State-based sync engine between Jiku requirements and GitHub issues + a Project v2: creation both
+  ways (public requirements and new issues), title, description, state (open/closed and the
+  Project's Status), priority, type, comments with edits and deletions, visibility changes, issue
+  transfers and recovery of interrupted creations.
+- Mapping file with reusable presets resolved by name at runtime and hot reload; `check-config`.
+- Worker: GitHub polling (issues, comments, Project item values), Jiku's requirement events,
+  periodic reconciliation, HMAC-verified webhook receiver, `/healthz` and `/readyz`.
+- `sync-inicial`: one-time sync of what already exists, with a reviewable plan and `--dry-run`.
+- State in the connector's space of Jiku's KV (no Jiku change, no tags).

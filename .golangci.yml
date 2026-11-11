@@ -13,6 +13,10 @@ linters:
       exclude-functions:
         - (io.Closer).Close
         - (*os.File).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*github.com/gravadigital/jiku-go/events.Consumer).Close
+        - (*github.com/gravadigital/jiku-go.Client).Close
     gosec:
       excludes:
         - G118 # shutdown deliberately uses a fresh context

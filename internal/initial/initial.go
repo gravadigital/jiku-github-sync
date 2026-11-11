@@ -57,10 +57,7 @@ type Plan struct {
 }
 
 // ManualLink pins a requirement to an issue ("owner/repo#123").
-type ManualLink struct {
-	Requirement int64  `yaml:"requirement"`
-	Issue       string `yaml:"issue"`
-}
+type ManualLink = mapping.ManualLink
 
 // LoadLinks reads a manual links file.
 func LoadLinks(path string) ([]ManualLink, error) {
@@ -325,8 +322,9 @@ func Apply(ctx context.Context, e *engine.Engine, st *state.Store, pl *Plan, pro
 		_, err := e.ImportIssue(ctx, p, is, opts)
 		step("importar "+issueRef(is), err)
 	}
-	if err := st.UpdateProject(ctx, p.JikuProject, func(ps *state.ProjectState) { ps.InitialSyncAt = time.Now().UTC() }); err != nil {
-		errs = append(errs, err)
+	if len(errs) > 0 {
+		// Not recorded as done: the service retries it (it is idempotent) on its next start.
+		return errors.Join(errs...)
 	}
-	return errors.Join(errs...)
+	return st.UpdateProject(ctx, p.JikuProject, func(ps *state.ProjectState) { ps.InitialSyncAt = time.Now().UTC() })
 }

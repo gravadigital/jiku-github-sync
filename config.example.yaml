@@ -64,3 +64,12 @@ projects:
     defaultRepo: acme-org/example-api           # issues of requirements born in Jiku go here
     githubProject: PVT_xxxxxxxxxxxxxxxx         # Project v2 node id (optional: without it, open/closed only)
     fieldMapping: kanban-example
+    # What already existed when the project was mapped (open items, with their comments):
+    #   plan  (default) the service logs the plan and writes nothing
+    #   apply           the service runs it once (recorded in its state, never repeated)
+    #   off             nothing
+    # Edit this file while the service runs: the change is picked up without a restart.
+    initialSync: plan
+    # Existing requirement <-> existing issue pairs the initial sync must link, not duplicate.
+    links:
+      - { requirement: 456, issue: acme-org/example-api#12 }

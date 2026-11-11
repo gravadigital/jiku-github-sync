@@ -203,11 +203,13 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	eng := engine.New(engine.Options{GitHub: gh, Jiku: jk, Store: st, Config: m, Logger: log})
 	w := worker.New(worker.Options{
 		Engine: eng, GitHub: gh, Jiku: jk, Store: st, Logger: log,
-		Events:            worker.JikuEvents{Client: c, Durable: cfg.EventsDurable},
-		PollInterval:      cfg.PollInterval,
-		ReconcileInterval: cfg.ReconcileInterval,
-		MappingFile:       cfg.MappingFile,
-		ConfigReload:      cfg.ConfigReload,
+		Events:               worker.JikuEvents{Client: c, Durable: cfg.EventsDurable},
+		PollInterval:         cfg.PollInterval,
+		ReconcileInterval:    cfg.ReconcileInterval,
+		MappingFile:          cfg.MappingFile,
+		ConfigReload:         cfg.ConfigReload,
+		WriteInterval:        cfg.WriteInterval,
+		VerifyAfterReconcile: cfg.VerifyAfterReconcile,
 	})
 	h.Add("github-poll", w.Ready)
 	if cfg.WebhookSecret != "" {
@@ -295,7 +297,7 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	if p == nil {
 		return fmt.Errorf("project %d is not in %s", projectID, cfg.MappingFile)
 	}
-	var manual []initial.ManualLink
+	manual := p.Links
 	if *links != "" {
 		if manual, err = initial.LoadLinks(*links); err != nil {
 			return err

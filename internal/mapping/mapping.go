@@ -45,9 +45,36 @@ type Project struct {
 	// FieldMapping names a preset of File.FieldMappings. Ignored without GithubProject, except
 	// for the issue type, which lives on the issue.
 	FieldMapping string `yaml:"fieldMapping"`
+	// InitialSync says what the service does with what already existed when the project was
+	// mapped: "plan" (default: compute the plan and log it, write nothing), "apply" (run it once;
+	// it is recorded in the state and never repeated) or "off".
+	InitialSync string `yaml:"initialSync"`
+	// Links pin existing requirements to existing issues for the initial sync.
+	Links []ManualLink `yaml:"links"`
 
 	// Fields is the resolved preset (nil when none). Filled by Load.
 	Fields *FieldMapping `yaml:"-"`
+}
+
+// Initial sync modes.
+const (
+	InitialSyncPlan  = "plan"
+	InitialSyncApply = "apply"
+	InitialSyncOff   = "off"
+)
+
+// ManualLink pins a requirement to an issue ("owner/repo#123") in the initial sync.
+type ManualLink struct {
+	Requirement int64  `yaml:"requirement"`
+	Issue       string `yaml:"issue"`
+}
+
+// InitialSyncMode returns the project's mode, "plan" when unset.
+func (p *Project) InitialSyncMode() string {
+	if p.InitialSync == "" {
+		return InitialSyncPlan
+	}
+	return p.InitialSync
 }
 
 // FieldMapping says how the fields of a GitHub Project (and the issue type) translate to Jiku.
@@ -173,6 +200,16 @@ func (f *File) validate() error {
 			errs = append(errs, fmt.Errorf("%s.defaultRepo is required", at))
 		} else if !p.HasRepo(p.DefaultRepo) {
 			errs = append(errs, fmt.Errorf("%s.defaultRepo %q must be one of repos", at, p.DefaultRepo))
+		}
+		switch p.InitialSync {
+		case "", InitialSyncPlan, InitialSyncApply, InitialSyncOff:
+		default:
+			errs = append(errs, fmt.Errorf("%s.initialSync: %q is not plan, apply or off", at, p.InitialSync))
+		}
+		for j, l := range p.Links {
+			if l.Requirement <= 0 || !strings.Contains(l.Issue, "#") {
+				errs = append(errs, fmt.Errorf("%s.links[%d]: needs requirement and issue (owner/repo#123)", at, j))
+			}
 		}
 		if p.FieldMapping != "" {
 			fm, ok := f.FieldMappings[p.FieldMapping]

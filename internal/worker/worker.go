@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gravadigital/jiku-github-sync/internal/checkconfig"
 	"github.com/gravadigital/jiku-github-sync/internal/engine"
 	"github.com/gravadigital/jiku-github-sync/internal/github"
 	"github.com/gravadigital/jiku-github-sync/internal/jiku"
@@ -20,12 +21,14 @@ import (
 	"github.com/gravadigital/jiku-github-sync/internal/state"
 )
 
-// GitHubPoller is what polling needs from GitHub.
-type GitHubPoller interface {
-	ListIssues(ctx context.Context, repo string, since time.Time, state string) ([]*github.Issue, error)
+// GitHub is what the worker needs from GitHub: the engine's calls plus polling, the
+// configuration check and the initial sync.
+type GitHub interface {
+	engine.GitHub
 	ListRepoComments(ctx context.Context, repo string, since time.Time) ([]*github.Comment, error)
 	ListItems(ctx context.Context, projectID string) ([]*github.Item, error)
 	GetRepo(ctx context.Context, repo string) (*github.Repo, error)
+	OrgIssueTypes(ctx context.Context, org string) ([]string, error)
 }
 
 // Events is Jiku's event stream; Run blocks, calling handle for each requirement event.
@@ -46,7 +49,7 @@ type Event struct {
 // Options configures a Worker.
 type Options struct {
 	Engine            *engine.Engine
-	GitHub            GitHubPoller
+	GitHub            GitHub
 	Jiku              jiku.API
 	Store             *state.Store
 	Events            Events // nil: no event stream (polling and reconciliation only)
@@ -55,6 +58,10 @@ type Options struct {
 	ReconcileInterval time.Duration
 	MappingFile       string
 	ConfigReload      time.Duration
+	// WriteInterval is SYNC_WRITE_INTERVAL, for the initial sync's estimate.
+	WriteInterval time.Duration
+	// VerifyAfterReconcile logs a verification of every project after each reconciliation.
+	VerifyAfterReconcile bool
 }
 
 // Worker runs everything.
@@ -141,7 +148,30 @@ func (w *Worker) startProjects(ctx context.Context) {
 				w.log.Warn("mapped repo is PUBLIC: any GitHub user can create public requirements in Jiku", "repo", r)
 			}
 		}
+		w.checkConfig(ctx, p)
+		if p.InitialSyncMode() != mapping.InitialSyncOff {
+			w.Enqueue(Key{Kind: InitialSync, Project: p.JikuProject})
+		}
 	}
+}
+
+// checkConfig logs the comparison of the mapping with the real GitHub side (what the
+// check-config command prints), on startup and on every reload of the mapping.
+func (w *Worker) checkConfig(ctx context.Context, p *mapping.Project) {
+	errs, warns := 0, 0
+	for _, f := range checkconfig.Run(ctx, w.o.GitHub, &mapping.File{Projects: []*mapping.Project{p}}, p.JikuProject) {
+		switch f.Level {
+		case checkconfig.Error:
+			errs++
+			w.log.Error("mapping check", "project", p.JikuProject, "finding", f.Msg)
+		case checkconfig.Warn:
+			warns++
+			w.log.Warn("mapping check", "project", p.JikuProject, "finding", f.Msg)
+		default:
+			w.log.Debug("mapping check", "project", p.JikuProject, "finding", f.Msg)
+		}
+	}
+	w.log.Info("mapping checked", "project", p.JikuProject, "errors", errs, "warnings", warns)
 }
 
 func (w *Worker) processLoop(ctx context.Context) {
@@ -165,6 +195,10 @@ func (w *Worker) processLoop(ctx context.Context) {
 			err = w.o.Engine.HandleIssue(ctx, k.Repo, k.Number)
 		case IssueNode:
 			err = w.o.Engine.HandleIssueNode(ctx, k.Node)
+		case InitialSync:
+			err = w.initialSync(ctx, k.Project)
+		case Verify:
+			err = w.verify(ctx, k.Project)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -346,6 +380,12 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 		}
 	}
 	w.log.Info("reconciliation queued", "items", n)
+	if w.o.VerifyAfterReconcile {
+		// Queued after the pairs: it runs once they have been synced.
+		for _, p := range w.o.Engine.Config().Projects {
+			w.Enqueue(Key{Kind: Verify, Project: p.JikuProject})
+		}
+	}
 	return errors.Join(errs...)
 }
 

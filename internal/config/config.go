@@ -39,6 +39,8 @@ type Config struct {
 	WriteInterval     time.Duration
 	ConfigReload      time.Duration
 	EventsDurable     string
+	// VerifyAfterReconcile logs a verification of every project after each reconciliation.
+	VerifyAfterReconcile bool
 	// StateBackend is "kv" (Jiku's KV, the default) or "memory" (tests and trials: nothing
 	// survives a restart).
 	StateBackend string
@@ -69,7 +71,9 @@ func FromEnv() Config {
 		WriteInterval:     duration("SYNC_WRITE_INTERVAL", time.Second),
 		ConfigReload:      duration("SYNC_CONFIG_RELOAD", 30*time.Second),
 		EventsDurable:     os.Getenv("SYNC_EVENTS_DURABLE"),
-		StateBackend:      getenv("SYNC_STATE", "kv"),
+
+		VerifyAfterReconcile: getenv("SYNC_VERIFY", "true") != "false",
+		StateBackend:         getenv("SYNC_STATE", "kv"),
 	}
 }
 

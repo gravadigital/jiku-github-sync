@@ -108,3 +108,17 @@ func TestUnknownKeysRejected(t *testing.T) {
 		t.Fatalf("a typo in a key must fail, got %v", err)
 	}
 }
+
+func TestInitialSyncModeAndLinks(t *testing.T) {
+	f, err := Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: apply\n    links: [{requirement: 3, issue: a/b#4}]\n"))
+	if err != nil || f.Project(1).InitialSyncMode() != InitialSyncApply || len(f.Project(1).Links) != 1 {
+		t.Fatalf("valid apply mode with links: %v", err)
+	}
+	if def, _ := Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n")); def.Project(1).InitialSyncMode() != InitialSyncPlan {
+		t.Fatal("the default mode is plan: nothing is written until someone says apply")
+	}
+	_, err = Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: yes\n    links: [{requirement: 3}]\n"))
+	if err == nil || !strings.Contains(err.Error(), "initialSync") || !strings.Contains(err.Error(), "links[0]") {
+		t.Fatalf("invalid mode and link must fail: %v", err)
+	}
+}

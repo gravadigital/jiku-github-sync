@@ -19,6 +19,11 @@ const (
 	Issue
 	// IssueNode is an issue by node id.
 	IssueNode
+	// InitialSync runs (or plans) a project's initial sync, in the same serial queue as
+	// everything else so it never races the regular sync of the same pair.
+	InitialSync
+	// Verify compares both sides of every pair of a project and logs the differences.
+	Verify
 )
 
 // Key identifies something to sync.
@@ -28,6 +33,8 @@ type Key struct {
 	Repo   string
 	Number int
 	Node   string
+	// Project is the Jiku project of InitialSync and Verify.
+	Project int64
 	// BecamePublic is set when Jiku says the requirement just became public (R4).
 	BecamePublic bool
 }
@@ -38,6 +45,10 @@ func (k Key) id() string {
 		return fmt.Sprintf("r:%d", k.ReqID)
 	case Issue:
 		return fmt.Sprintf("i:%s#%d", k.Repo, k.Number)
+	case InitialSync:
+		return fmt.Sprintf("s:%d", k.Project)
+	case Verify:
+		return fmt.Sprintf("v:%d", k.Project)
 	default:
 		return "n:" + k.Node
 	}

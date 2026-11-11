@@ -37,7 +37,8 @@ A card left without a column (e.g. after a Project's options were replaced) is p
 Jiku's state says.
 
 Only issues and requirements **created after the connector started watching a project** are
-synced automatically; what already existed is brought in once with `sync-inicial`.
+synced automatically; what already existed is brought in once by the **initial sync**, which the
+service itself runs when the project's `initialSync` is `apply` (see below).
 
 ## How it works
 
@@ -89,7 +90,31 @@ projects:
     fieldMapping: my-board
 ```
 
+## Running as a service
+
+The connector is meant to run as a long-lived container; nothing needs a command:
+
+- **On start and on every reload of the mapping** it checks the mapping against GitHub (repos,
+  fields, options, issue types) and logs the findings (`mapping check`, ERROR / WARN).
+- **Initial sync**, per project, from the mapping (`initialSync`):
+  - `plan` (default): the plan is logged one line per item (`initial sync plan: …`) with a
+    summary (what is linked, created, skipped, comments, writes, estimate). Nothing is written.
+  - `apply`: the plan is run once, in the same serial queue as the regular sync; when it ends
+    without errors it is recorded in the state and never repeated (with errors, it is retried on
+    the next start or reload; it is idempotent).
+  - Typical flow: map the project, read the plan in the logs, switch to `apply` in the file.
+    Manual links go in the project's `links`.
+- **After each reconciliation** it logs a read-only verification of every pair
+  (`verification`, differences as WARN). `SYNC_VERIFY=false` turns it off.
+
+```sh
+docker logs -f jiku-github-sync | jq -r 'select(.msg|startswith("initial sync")) | [.msg, .title // .reason // ""] | @tsv'
+```
+
 ## Commands
+
+The same operations exist as subcommands, for diagnosis (`docker exec … jiku-github-sync verify 12`):
+
 
 ```
 jiku-github-sync [serve]                         runs the worker (default)

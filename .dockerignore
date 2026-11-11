@@ -1,0 +1,12 @@
+.git
+.github
+.local
+_research
+docs
+test
+bin
+dist
+*.md
+.env
+.env.*
+docker-compose*.yml

@@ -1,0 +1,15 @@
+# Credentials: never commit
+*.service_user.json
+*-su.json
+*.key.json
+.local/
+.env
+
+# Research notes: they hold client data (org names, people, project ids)
+_research/
+
+# Build and test artefacts
+/bin/
+/dist/
+*.test
+coverage.out

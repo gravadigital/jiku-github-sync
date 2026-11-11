@@ -1,0 +1,66 @@
+# jiku-github-sync — mapping configuration (SYNC_CONFIG). Copy it and adapt it.
+#
+# Every name on the GitHub side (fields, options, issue types, labels) is configuration: the
+# connector resolves them to ids at runtime, by name. A Project with other columns uses another
+# preset; a Project whose columns change only needs its names updated here. Run
+# `jiku-github-sync check-config` after any change on either side.
+#
+# The Jiku side is fixed by its contract:
+#   states:     analisis, planificacion, en_cola, desarrollo, revision, resuelto, cancelado
+#   priorities: sin_prioridad, baja, media, alta, urgente
+#   types:      funcionalidad, mejora, incidencia, otro
+
+fieldMappings:
+  # A board with one column per Jiku stage plus a "Blocked" column Jiku has no state for.
+  kanban-example:
+    status:
+      field: Status
+      toJiku:                                   # option -> Jiku state (several may share one)
+        "Inbox": analisis
+        "Ideas": analisis
+        "Backlog": planificacion
+        "Ready": en_cola
+        "In Progress": desarrollo
+        "Blocked": { state: en_cola, comment: "Marcado como {option} en GitHub por @{login}" }
+        "Review": revision
+        "Done": resuelto
+      toGithub:                                 # Jiku state -> one option (null: leave as is)
+        analisis: "Inbox"
+        planificacion: "Backlog"
+        en_cola: "Ready"
+        desarrollo: "In Progress"
+        revision: "Review"
+        resuelto: "Done"
+        cancelado: null
+    priority:
+      field: Priority
+      map:                                      # Jiku priority -> option (null: empty field)
+        urgente: "Critical"
+        alta: "High"
+        media: "Medium"
+        baja: "Low"
+        sin_prioridad: null
+      toJiku:                                   # extra options with no Jiku counterpart
+        "Lowest": sin_prioridad
+    type:
+      sources: [issueType, label]               # precedence when reading GitHub
+      issueType:
+        Bug: incidencia
+        Feature: funcionalidad
+        Task: funcionalidad
+      label:
+        "type/bug": incidencia
+        "type/feature": funcionalidad
+        "enhancement": mejora
+      toGithub:                                 # Jiku type -> issue type (null: no type)
+        incidencia: Bug
+        funcionalidad: Feature
+        mejora: Feature
+        otro: null
+
+projects:
+  - jikuProject: 123                            # project id in Jiku
+    repos: [acme-org/example-api, acme-org/example-web]   # new issues of these become requirements
+    defaultRepo: acme-org/example-api           # issues of requirements born in Jiku go here
+    githubProject: PVT_xxxxxxxxxxxxxxxx         # Project v2 node id (optional: without it, open/closed only)
+    fieldMapping: kanban-example

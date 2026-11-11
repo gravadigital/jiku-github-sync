@@ -13,3 +13,8 @@ _research/
 /dist/
 *.test
 coverage.out
+
+# Database dumps: production data, never committed
+*.sql
+*.sql.gz
+*.dump

@@ -669,3 +669,21 @@ func TestExportWinsEvenIfTheTimelineLags(t *testing.T) {
 	h.gh.timelineLag = 0
 	h.quiet(r.ID)
 }
+
+func TestWipedCardIsRestoredFromJiku(t *testing.T) {
+	h := newHarness(t)
+	r := h.jk.newReq(7, "Wipe", "x", "", "public")
+	h.jk.editReq(r.ID, func(x *jikuReq) { x.State = "revision" })
+	h.syncReq(r.ID)
+	is := h.issueOf(r.ID)
+	// The Project's options are replaced: every option gets a new id and every card loses its value.
+	for name := range h.gh.schema.Fields["Status"].Options {
+		h.gh.schema.Fields["Status"].Options[name] = "O2_" + name
+	}
+	delete(h.gh.items[is.NodeID].Values, "Status")
+	h.syncReq(r.ID)
+	if h.req(r.ID) != "revision" || h.status(is.NodeID) != "Review" {
+		t.Fatalf("jiku=%s card=%q", h.req(r.ID), h.status(is.NodeID))
+	}
+	h.quiet(r.ID)
+}

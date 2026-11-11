@@ -375,7 +375,11 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 			"La columna «%s» de GitHub no tiene un estado de Jiku configurado (movido por @%s). El requisito sigue en «%s».",
 			tg.unmapped, v.statusBy, req.State))
 	}
-	differ := (tg.known && tg.state != req.State) || (!tg.known && jChanged)
+	// A card with no column on an open issue says nothing (e.g. the Project's options were
+	// replaced and every value was wiped): it is put back where Jiku's state says.
+	_, jikuHasOption := p.OptionForState(req.State)
+	emptyCard := item != nil && is.Open() && v.status == "" && jikuHasOption
+	differ := (tg.known && tg.state != req.State) || (!tg.known && jChanged) || emptyCard
 	if last.JikuState == "" {
 		gChanged = false // just exported: Jiku is the origin (see priority above)
 	}
@@ -459,6 +463,9 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		if err := w(); err != nil {
 			log.Error("could not write a Project field", "error", err)
 		}
+	}
+	if len(fieldWrites) > 0 {
+		log.Info("project fields updated from jiku", "status", finalStatus, "priority", finalPriorityOpt)
 	}
 	for _, n := range notices {
 		if _, err := e.jk.CreateComment(ctx, req.ID, n, "internal"); err != nil {

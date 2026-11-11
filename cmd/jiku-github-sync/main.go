@@ -4,6 +4,7 @@
 //	jiku-github-sync [serve]                        run the worker (default)
 //	jiku-github-sync check-config [<project>]       compare the mapping with GitHub
 //	jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
+//	jiku-github-sync verify <project>               compare both sides, read-only
 //	jiku-github-sync healthcheck                    query /readyz (Docker HEALTHCHECK)
 //	jiku-github-sync version
 package main
@@ -35,6 +36,7 @@ import (
 	"github.com/gravadigital/jiku-github-sync/internal/logging"
 	"github.com/gravadigital/jiku-github-sync/internal/mapping"
 	"github.com/gravadigital/jiku-github-sync/internal/state"
+	"github.com/gravadigital/jiku-github-sync/internal/verify"
 	"github.com/gravadigital/jiku-github-sync/internal/webhook"
 	"github.com/gravadigital/jiku-github-sync/internal/worker"
 )
@@ -50,6 +52,8 @@ const usage = `jiku-github-sync — Jiku ↔ GitHub (Issues + Projects) connecto
   jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
                                               one-time sync of everything open that already
                                               exists, both ways, with its comments
+  jiku-github-sync verify <project>           read-only: compares both sides of every pair and
+                                              lists what is not linked (exit 1 on differences)
   jiku-github-sync healthcheck                queries /readyz of the local process
   jiku-github-sync version
 
@@ -75,6 +79,8 @@ func main() {
 		err = checkConfig(ctx, cfg, log, args)
 	case "sync-inicial", "initial-sync":
 		err = syncInicial(ctx, cfg, log, args)
+	case "verify":
+		err = verifyCmd(ctx, cfg, log, args)
 	case "healthcheck":
 		err = healthcheck(cfg)
 	case "version", "--version", "-v":
@@ -309,7 +315,7 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 		return err
 	}
 	jk := jiku.New(c)
-	pl, err := initial.Build(ctx, initial.Deps{GitHub: gh, Jiku: jk, Store: st, WriteInterval: cfg.WriteInterval}, p, manual)
+	pl, err := initial.Build(ctx, initial.Deps{GitHub: gh, Jiku: jk, Store: st, WriteInterval: cfg.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p, manual)
 	if err != nil {
 		return err
 	}
@@ -325,6 +331,42 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	}
 	fmt.Println("Listo.")
 	return nil
+}
+
+func verifyCmd(ctx context.Context, cfg config.Config, log *slog.Logger, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: jiku-github-sync verify <project>")
+	}
+	projectID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("project id: %w", err)
+	}
+	m, err := mapping.Load(cfg.MappingFile)
+	if err != nil {
+		return err
+	}
+	p := m.Project(projectID)
+	if p == nil {
+		return fmt.Errorf("project %d is not in %s", projectID, cfg.MappingFile)
+	}
+	gh, err := newGitHub(cfg, log)
+	if err != nil {
+		return err
+	}
+	c, err := connect(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	st, err := newStore(ctx, cfg, c)
+	if err != nil {
+		return err
+	}
+	rep, err := verify.Run(ctx, gh, gh, jiku.New(c), st, p)
+	if err != nil {
+		return err
+	}
+	return rep.Render(os.Stdout)
 }
 
 func healthcheck(cfg config.Config) error {

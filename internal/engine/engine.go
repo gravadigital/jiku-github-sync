@@ -20,6 +20,9 @@ import (
 	"github.com/gravadigital/jiku-github-sync/internal/state"
 )
 
+// DefaultItemSettle is how long the engine waits for a Project's "item added" workflow.
+const DefaultItemSettle = 8 * time.Second
+
 // AutomationLogin is the actor of GitHub's built-in Project workflows.
 const AutomationLogin = "github-project-automation"
 
@@ -82,7 +85,7 @@ func New(o Options) *Engine {
 	e := &Engine{
 		gh: o.GitHub, jk: o.Jiku, st: o.Store, log: o.Logger, cfg: o.Config,
 		schemas: map[string]schemaEntry{}, schemaTTL: o.SchemaTTL, now: o.Now,
-		ItemSettle: 8 * time.Second,
+		ItemSettle: DefaultItemSettle,
 	}
 	if e.log == nil {
 		e.log = slog.Default()

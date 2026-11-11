@@ -88,6 +88,9 @@ type Deps struct {
 	Store  *state.Store
 	// WriteInterval is the gap between GitHub writes (SYNC_WRITE_INTERVAL), for the estimate.
 	WriteInterval time.Duration
+	// ItemSettle is the wait after adding each issue to the Project (the engine's ItemSettle),
+	// for the estimate.
+	ItemSettle time.Duration
 }
 
 func normTitle(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
@@ -226,7 +229,8 @@ func Build(ctx context.Context, d Deps, p *mapping.Project, manual []ManualLink)
 	}
 	pl.GitHubCreates = len(pl.Export) + pl.CommentsToGitHub + items
 	pl.JikuCreates = len(pl.Import) + pl.CommentsToJiku
-	pl.Estimate = estimate(pl.GitHubCreates, d.WriteInterval)
+	// Each item added to the Project waits for its workflow before its fields are written.
+	pl.Estimate = estimate(pl.GitHubCreates, d.WriteInterval) + time.Duration(len(pl.Export))*d.ItemSettle
 	return pl, nil
 }
 

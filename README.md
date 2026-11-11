@@ -95,6 +95,7 @@ projects:
 jiku-github-sync [serve]                         runs the worker (default)
 jiku-github-sync check-config [<project>]        compares the mapping with GitHub (exit 1 on errors)
 jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
+jiku-github-sync verify <project>                read-only: compares both sides of every pair
 jiku-github-sync healthcheck                     queries /readyz (Docker HEALTHCHECK)
 jiku-github-sync version
 ```
@@ -108,6 +109,11 @@ jiku-github-sync version
   how many writes and how long given GitHub's limits — and `--dry-run` stops there. Manual links:
   a YAML list `[{requirement: 12, issue: owner/repo#3}]`. Running it again is safe. Every comment
   copied into Jiku notifies the requirement's subscribers by mail: the plan says how many.
+
+- **`verify`**: read-only. For every linked pair it compares title, description, state and
+  column, priority, type and that every comment has its copy on the other side, and it lists the
+  open public requirements and open issues that have no pair. Run it after `sync-inicial`, or
+  whenever drift is suspected (exit 1 on differences).
 
 ## Running it
 

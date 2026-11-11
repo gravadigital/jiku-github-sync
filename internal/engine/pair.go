@@ -342,7 +342,10 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	if p.Fields != nil && p.Fields.Priority != nil && item != nil {
 		gp, gok := p.PriorityFromOption(v.priority)
 		jChanged := req.Priority != last.JikuPriority
-		switch decide(jChanged, v.priority != last.GHPriority && gok, (gok && gp != req.Priority) || (!gok && jChanged), req.UpdatedAt, v.priorityAt) {
+		// An empty Jiku side in the snapshot means the issue was just created from Jiku: Jiku is the
+		// origin and wins, whatever the Project's workflows did to the new item meanwhile.
+		gPriChanged := v.priority != last.GHPriority && gok && last.JikuPriority != ""
+		switch decide(jChanged, gPriChanged, (gok && gp != req.Priority) || (!gok && jChanged), req.UpdatedAt, v.priorityAt) {
 		case sideJiku:
 			if opt, ok := p.OptionForPriority(req.Priority); ok && opt != v.priority {
 				field := p.Fields.Priority.Field
@@ -373,6 +376,9 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 			tg.unmapped, v.statusBy, req.State))
 	}
 	differ := (tg.known && tg.state != req.State) || (!tg.known && jChanged)
+	if last.JikuState == "" {
+		gChanged = false // just exported: Jiku is the origin (see priority above)
+	}
 	switch decide(jChanged, gChanged && tg.known, differ, req.UpdatedAt, gAt) {
 	case sideJiku:
 		wantOpen := !terminal(req.State)

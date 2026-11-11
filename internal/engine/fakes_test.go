@@ -47,6 +47,9 @@ type fakeGH struct {
 	issueTypes       map[string]bool // nil = every type accepted
 	// statusLog is the issue timeline of Status changes (node -> changes).
 	statusLog map[string][]github.StatusChange
+	// timelineLag hides the last N status changes from LastStatusChange, like GitHub's
+	// asynchronous timeline.
+	timelineLag int
 }
 
 func newFakeGH(clk *clock) *fakeGH {
@@ -575,6 +578,9 @@ func (f *fakeGH) LastStatusChange(_ context.Context, node, _ string) (*github.St
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	l := f.statusLog[node]
+	if f.timelineLag > 0 && len(l) >= f.timelineLag {
+		l = l[:len(l)-f.timelineLag]
+	}
 	if len(l) == 0 {
 		return nil, nil
 	}

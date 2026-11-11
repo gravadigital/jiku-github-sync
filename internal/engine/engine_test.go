@@ -655,3 +655,17 @@ func TestRenamedOptionIsReadAgain(t *testing.T) {
 		t.Fatalf("option must be resolved by name again, got %s", h.status(is.NodeID))
 	}
 }
+
+func TestExportWinsEvenIfTheTimelineLags(t *testing.T) {
+	h := newHarness(t)
+	h.gh.timelineLag = 1 // the workflow's "Inbox" is not in the timeline yet: its actor is unknown
+	r := h.jk.newReq(7, "Lag", "x", "", "public")
+	h.jk.editReq(r.ID, func(x *jikuReq) { x.State = "desarrollo"; x.Priority = "alta" })
+	h.syncReq(r.ID)
+	is := h.issueOf(r.ID)
+	if h.req(r.ID) != "desarrollo" || h.status(is.NodeID) != "In Progress" {
+		t.Fatalf("Jiku is the origin of a new issue: jiku=%s card=%s", h.req(r.ID), h.status(is.NodeID))
+	}
+	h.gh.timelineLag = 0
+	h.quiet(r.ID)
+}

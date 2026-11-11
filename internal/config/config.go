@@ -68,7 +68,7 @@ func FromEnv() Config {
 		ReconcileInterval: duration("SYNC_RECONCILE_INTERVAL", 15*time.Minute),
 		WriteInterval:     duration("SYNC_WRITE_INTERVAL", time.Second),
 		ConfigReload:      duration("SYNC_CONFIG_RELOAD", 30*time.Second),
-		EventsDurable:     getenv("SYNC_EVENTS_DURABLE", "jiku-github-sync"),
+		EventsDurable:     os.Getenv("SYNC_EVENTS_DURABLE"),
 		StateBackend:      getenv("SYNC_STATE", "kv"),
 	}
 }

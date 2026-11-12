@@ -10,6 +10,17 @@
 #   priorities: sin_prioridad, baja, media, alta, urgente
 #   types:      funcionalidad, mejora, incidencia, otro
 
+# GitHub credentials, one per client, by name. The secrets never go in this file: it only says
+# where to read them. Without this section every project uses GITHUB_TOKEN.
+credentials:
+  client-a:
+    token: { env: GITHUB_TOKEN_CLIENT_A }        # or { file: /run/secrets/jiku-github-sync/client-a }
+  client-b:
+    # The connector's GitHub App (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_*), installed on each
+    # of the client's organizations. A project using it keeps its repos and Project in one org.
+    app:
+      installations: { client-b-org: 12345678 }
+
 fieldMappings:
   # A board with one column per Jiku stage plus a "Blocked" column Jiku has no state for.
   kanban-example:
@@ -60,6 +71,7 @@ fieldMappings:
 
 projects:
   - jikuProject: 123                            # project id in Jiku
+    credentials: client-a                       # its client's GitHub credentials
     repos: [acme-org/example-api, acme-org/example-web]   # new issues of these become requirements
     defaultRepo: acme-org/example-api           # issues of requirements born in Jiku go here
     githubProject: PVT_xxxxxxxxxxxxxxxx         # Project v2 node id (optional: without it, open/closed only)

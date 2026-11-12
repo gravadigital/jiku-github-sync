@@ -28,9 +28,13 @@ services:
     # Runs with the host uid: Jiku's sentinel creds and the key are 0600, owned by the host user.
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     env_file: .env
+    # Per-client tokens given as environment variables (`token: { env: GITHUB_TOKEN_<CLIENT> }`)
+    # are passed through from a local override (-f), since their names are deployment data.
     environment:
       - GITHUB_TOKEN
       - GITHUB_WEBHOOK_SECRET
+      - GITHUB_APP_ID
+      - GITHUB_APP_PRIVATE_KEY_B64
       - JIKU_SERVERS=nats://nats:4222
       - JIKU_CREDS=/run/secrets/nats.creds
       - JIKU_KEY_FILE=/etc/jiku-github-sync/${SYNC_KEY_FILE_NAME:-jiku_github_sync.key.json}
@@ -38,6 +42,9 @@ services:
     volumes:
       - ${JIKU_DEPLOY_DIR:-../../jiku/deploy}/nats/creds/sentinel-client.creds:/run/secrets/nats.creds:ro
       - ${SYNC_CONFIG_DIR:-./.local}:/etc/jiku-github-sync:ro
+      # Optional: one file per client's GitHub token, referenced from the mapping as
+      # `token: { file: /run/secrets/jiku-github-sync/<client> }`.
+      - ${SYNC_SECRETS_DIR:-./.local/secrets}:/run/secrets/jiku-github-sync:ro
     ports:
       - "127.0.0.1:8095:8080"
     restart: unless-stopped

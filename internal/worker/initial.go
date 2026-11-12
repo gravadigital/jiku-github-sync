@@ -28,7 +28,7 @@ func (w *Worker) initialSync(ctx context.Context, projectID int64) error {
 		w.log.Info("initial sync already applied", "project", projectID, "at", ps.InitialSyncAt)
 		return nil
 	}
-	pl, err := initial.Build(ctx, initial.Deps{GitHub: w.o.GitHub, Jiku: w.o.Jiku, Store: w.o.Store,
+	pl, err := initial.Build(ctx, initial.Deps{GitHub: w.o.GitHubFor(p), Jiku: w.o.Jiku, Store: w.o.Store,
 		WriteInterval: w.o.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p)
 	if err != nil {
 		return fmt.Errorf("initial sync plan: %w", err)
@@ -74,7 +74,8 @@ func (w *Worker) verify(ctx context.Context, projectID int64) error {
 	if p == nil {
 		return nil
 	}
-	rep, err := verify.Run(ctx, w.o.GitHub, w.o.GitHub, w.o.Jiku, w.o.Store, p)
+	gh := w.o.GitHubFor(p)
+	rep, err := verify.Run(ctx, gh, gh, w.o.Jiku, w.o.Store, p)
 	if err != nil {
 		return fmt.Errorf("verification: %w", err)
 	}

@@ -77,7 +77,7 @@ func (e *Engine) view(ctx context.Context, p *mapping.Project, is *github.Issue,
 			v.status, v.statusAt = fv.Option, fv.UpdatedAt
 			// Who moved the card is only in the issue's timeline: read it when the card moved.
 			if v.status != last.GHStatus && v.status != "" {
-				sc, err := e.gh.LastStatusChange(ctx, is.NodeID, p.GithubProject)
+				sc, err := e.gh(p).LastStatusChange(ctx, is.NodeID, p.GithubProject)
 				switch {
 				case err != nil:
 					log.Warn("cannot read who moved the card", "error", err)
@@ -99,14 +99,14 @@ func (e *Engine) view(ctx context.Context, p *mapping.Project, is *github.Issue,
 }
 
 // fetchIssue reads the pair's issue, following a transfer (the node id survives it).
-func (e *Engine) fetchIssue(ctx context.Context, l *state.Link) (*github.Issue, error) {
-	is, err := e.gh.GetIssue(ctx, l.Repo, l.Number)
+func (e *Engine) fetchIssue(ctx context.Context, p *mapping.Project, l *state.Link) (*github.Issue, error) {
+	is, err := e.gh(p).GetIssue(ctx, l.Repo, l.Number)
 	if errors.Is(err, github.ErrNotFound) {
-		repo, num, rerr := e.gh.IssueRef(ctx, l.IssueNodeID)
+		repo, num, rerr := e.gh(p).IssueRef(ctx, l.IssueNodeID)
 		if rerr != nil {
 			return nil, rerr
 		}
-		if is, err = e.gh.GetIssue(ctx, repo, num); err != nil {
+		if is, err = e.gh(p).GetIssue(ctx, repo, num); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
@@ -127,7 +127,7 @@ func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Li
 	if p.GithubProject == "" {
 		return nil, nil
 	}
-	item, err := e.gh.ItemForIssue(ctx, is.NodeID, p.GithubProject)
+	item, err := e.gh(p).ItemForIssue(ctx, is.NodeID, p.GithubProject)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Li
 		l.ItemID = item.ID
 		return item, nil
 	}
-	id, err := e.gh.AddItem(ctx, p.GithubProject, is.NodeID)
+	id, err := e.gh(p).AddItem(ctx, p.GithubProject, is.NodeID)
 	if err != nil {
 		return nil, fmt.Errorf("adding the issue to the Project: %w", err)
 	}
@@ -144,7 +144,7 @@ func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Li
 	// Give the Project's "item added" workflow time to run before reading (and writing) fields.
 	deadline := e.now().Add(e.ItemSettle)
 	for {
-		item, err = e.gh.ItemForIssue(ctx, is.NodeID, p.GithubProject)
+		item, err = e.gh(p).ItemForIssue(ctx, is.NodeID, p.GithubProject)
 		if err != nil {
 			return nil, err
 		}
@@ -167,7 +167,7 @@ func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Li
 // setField writes a single-select field by names; option "" clears it.
 func (e *Engine) setField(ctx context.Context, p *mapping.Project, item *github.Item, field, option string) error {
 	for attempt := 0; attempt < 2; attempt++ {
-		s, err := e.schema(ctx, p.GithubProject)
+		s, err := e.schema(ctx, p)
 		if err != nil {
 			return err
 		}
@@ -187,9 +187,9 @@ func (e *Engine) setField(ctx context.Context, p *mapping.Project, item *github.
 			return fmt.Errorf("the field %q has no option %q (check the mapping: check-config)", field, option)
 		}
 		if option == "" {
-			return e.gh.ClearField(ctx, p.GithubProject, item.ID, f.ID)
+			return e.gh(p).ClearField(ctx, p.GithubProject, item.ID, f.ID)
 		}
-		return e.gh.SetSelect(ctx, p.GithubProject, item.ID, f.ID, optID)
+		return e.gh(p).SetSelect(ctx, p.GithubProject, item.ID, f.ID, optID)
 	}
 	return nil
 }
@@ -256,7 +256,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	if err != nil {
 		return err
 	}
-	is, err := e.fetchIssue(ctx, l)
+	is, err := e.fetchIssue(ctx, p, l)
 	if errors.Is(err, github.ErrNotFound) {
 		log.Warn("issue not found (deleted?); skipping")
 		return nil
@@ -270,7 +270,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		if l.Unlinked {
 			return nil
 		}
-		if _, err := e.gh.CreateComment(ctx, is.Repo, is.Number, text.Notice(
+		if _, err := e.gh(p).CreateComment(ctx, is.Repo, is.Number, text.Notice(
 			"Este issue dejó de sincronizarse con Jiku: el requisito pasó a ser interno.")); err != nil {
 			return err
 		}
@@ -445,14 +445,14 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		log.Info("jiku updated from github", "fields", keys(jikuUpd))
 	}
 	if issueChanged {
-		if _, err := e.gh.UpdateIssue(ctx, is.Repo, is.Number, issueUpd); err != nil {
+		if _, err := e.gh(p).UpdateIssue(ctx, is.Repo, is.Number, issueUpd); err != nil {
 			return fmt.Errorf("updating %s#%d: %w", is.Repo, is.Number, err)
 		}
 		log.Info("github updated from jiku", "fields", issueFields(issueUpd))
 	}
 	ghTypeAfter := v.typeView
 	if typeWrite != nil {
-		if _, err := e.gh.UpdateIssue(ctx, is.Repo, is.Number, github.IssueInput{Type: typeWrite}); err != nil {
+		if _, err := e.gh(p).UpdateIssue(ctx, is.Repo, is.Number, github.IssueInput{Type: typeWrite}); err != nil {
 			log.Warn("could not set the issue type", "type", *typeWrite, "error", err)
 		} else {
 			ghTypeAfter, _ = p.TypeFromGithub(*typeWrite, is.Labels)
@@ -488,7 +488,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	}
 	l.Last = next
 
-	if err := e.syncComments(ctx, l, req, is, opts); err != nil {
+	if err := e.syncComments(ctx, p, l, req, is, opts); err != nil {
 		// The fields are synced: keep that progress before reporting the comments' failure.
 		_ = e.st.SaveLink(ctx, l)
 		return err

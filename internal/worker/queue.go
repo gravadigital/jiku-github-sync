@@ -54,12 +54,16 @@ func (k Key) id() string {
 	}
 }
 
-// Queue is a FIFO that holds each key at most once: enqueuing a key already waiting is a no-op
-// (the sync reads current state anyway), except that BecamePublic is kept.
+// Queue holds each key at most once (enqueuing a key already waiting is a no-op: the sync reads
+// current state anyway, but BecamePublic is kept) in two lanes: what just changed (Jiku events,
+// webhooks, polls) always goes before background work (reconciliation, verification, initial
+// sync), so a full sweep of many pairs never delays a fresh change.
 type Queue struct {
 	mu      sync.Mutex
-	order   []string
+	urgent  []string
+	backlog []string
 	items   map[string]Key
+	lane    map[string]bool // id -> urgent
 	signal  chan struct{}
 	limit   int
 	dropped int
@@ -67,25 +71,42 @@ type Queue struct {
 
 // NewQueue returns a queue that holds at most limit distinct keys.
 func NewQueue(limit int) *Queue {
-	return &Queue{items: map[string]Key{}, signal: make(chan struct{}, 1), limit: limit}
+	return &Queue{items: map[string]Key{}, lane: map[string]bool{}, signal: make(chan struct{}, 1), limit: limit}
 }
 
-// Push adds a key. It returns false when the queue is full (the reconciliation will catch up).
-func (q *Queue) Push(k Key) bool {
+// Push adds a key to the urgent lane. It returns false when the queue is full (the
+// reconciliation will catch up).
+func (q *Queue) Push(k Key) bool { return q.push(k, true) }
+
+// PushBackground adds a key to the background lane.
+func (q *Queue) PushBackground(k Key) bool { return q.push(k, false) }
+
+func (q *Queue) push(k Key, urgent bool) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	id := k.id()
 	if cur, ok := q.items[id]; ok {
 		cur.BecamePublic = cur.BecamePublic || k.BecamePublic
 		q.items[id] = cur
+		if urgent && !q.lane[id] {
+			// Waiting in the background and now it changed: promote it.
+			q.backlog = remove(q.backlog, id)
+			q.urgent = append(q.urgent, id)
+			q.lane[id] = true
+		}
 		return true
 	}
-	if q.limit > 0 && len(q.order) >= q.limit {
+	if q.limit > 0 && len(q.items) >= q.limit {
 		q.dropped++
 		return false
 	}
 	q.items[id] = k
-	q.order = append(q.order, id)
+	q.lane[id] = urgent
+	if urgent {
+		q.urgent = append(q.urgent, id)
+	} else {
+		q.backlog = append(q.backlog, id)
+	}
 	select {
 	case q.signal <- struct{}{}:
 	default:
@@ -93,17 +114,22 @@ func (q *Queue) Push(k Key) bool {
 	return true
 }
 
-// Pop takes the oldest key; ok is false when the queue is empty.
+// Pop takes the oldest urgent key, or else the oldest background one; ok is false when empty.
 func (q *Queue) Pop() (Key, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.order) == 0 {
+	var id string
+	switch {
+	case len(q.urgent) > 0:
+		id, q.urgent = q.urgent[0], q.urgent[1:]
+	case len(q.backlog) > 0:
+		id, q.backlog = q.backlog[0], q.backlog[1:]
+	default:
 		return Key{}, false
 	}
-	id := q.order[0]
-	q.order = q.order[1:]
 	k := q.items[id]
 	delete(q.items, id)
+	delete(q.lane, id)
 	return k, true
 }
 
@@ -111,8 +137,17 @@ func (q *Queue) Pop() (Key, bool) {
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.order)
+	return len(q.items)
 }
 
 // Signal is notified when something is pushed.
 func (q *Queue) Signal() <-chan struct{} { return q.signal }
+
+func remove(xs []string, x string) []string {
+	for i, v := range xs {
+		if v == x {
+			return append(xs[:i], xs[i+1:]...)
+		}
+	}
+	return xs
+}

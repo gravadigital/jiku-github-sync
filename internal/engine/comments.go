@@ -7,6 +7,7 @@ import (
 
 	"github.com/gravadigital/jiku-github-sync/internal/github"
 	"github.com/gravadigital/jiku-github-sync/internal/jiku"
+	"github.com/gravadigital/jiku-github-sync/internal/mapping"
 	"github.com/gravadigital/jiku-github-sync/internal/state"
 	"github.com/gravadigital/jiku-github-sync/internal/text"
 )
@@ -18,13 +19,13 @@ import (
 //
 // The mirrors are recognisable on their own (a marker on GitHub, the attribution link in Jiku),
 // so a crash between writing a mirror and saving the link does not produce a duplicate.
-func (e *Engine) syncComments(ctx context.Context, l *state.Link, req *jiku.Requirement, is *github.Issue, opts SyncOptions) error {
+func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.Link, req *jiku.Requirement, is *github.Issue, opts SyncOptions) error {
 	log := e.logPair(l)
 	jcs, err := e.jk.ListComments(ctx, req.ID)
 	if err != nil {
 		return err
 	}
-	gcs, err := e.gh.ListComments(ctx, is.Repo, is.Number)
+	gcs, err := e.gh(p).ListComments(ctx, is.Repo, is.Number)
 	if err != nil {
 		return err
 	}
@@ -107,7 +108,7 @@ func (e *Engine) syncComments(ctx context.Context, l *state.Link, req *jiku.Requ
 				cl := &l.Comments[i]
 				if cl.Origin == "jiku" && text.Hash(j.Body) != cl.SourceHash {
 					if _, alive := gByID[cl.GHID]; alive {
-						if err := e.gh.UpdateComment(ctx, is.Repo, cl.GHID, body); err != nil {
+						if err := e.gh(p).UpdateComment(ctx, is.Repo, cl.GHID, body); err != nil {
 							return err
 						}
 						log.Info("comment edit mirrored to github", "jikuComment", j.ID)
@@ -116,7 +117,7 @@ func (e *Engine) syncComments(ctx context.Context, l *state.Link, req *jiku.Requ
 				}
 				continue
 			}
-			gc, err := e.gh.CreateComment(ctx, is.Repo, is.Number, body)
+			gc, err := e.gh(p).CreateComment(ctx, is.Repo, is.Number, body)
 			if err != nil {
 				return err
 			}

@@ -28,6 +28,7 @@ import (
 
 	"github.com/gravadigital/jiku-github-sync/internal/checkconfig"
 	"github.com/gravadigital/jiku-github-sync/internal/config"
+	"github.com/gravadigital/jiku-github-sync/internal/creds"
 	"github.com/gravadigital/jiku-github-sync/internal/engine"
 	"github.com/gravadigital/jiku-github-sync/internal/github"
 	"github.com/gravadigital/jiku-github-sync/internal/health"
@@ -96,11 +97,65 @@ func main() {
 	}
 }
 
-func newGitHub(cfg config.Config, log *slog.Logger) (*github.Client, error) {
-	if err := cfg.ValidateGitHub(); err != nil {
+// newCredentials loads the GitHub credentials of the mapping: one client per client's
+// credentials (per organization for the App), plus GITHUB_TOKEN as the default.
+func newCredentials(cfg config.Config, m *mapping.File, log *slog.Logger) (*creds.Registry, error) {
+	key, err := cfg.AppKey()
+	if err != nil {
 		return nil, err
 	}
-	return github.New(github.Options{BaseURL: cfg.GitHubAPIURL, Token: cfg.GitHubToken, WriteInterval: cfg.WriteInterval, Logger: log}), nil
+	reg := creds.New(creds.Options{BaseURL: cfg.GitHubAPIURL, WriteInterval: cfg.WriteInterval, Logger: log,
+		DefaultToken: cfg.GitHubToken, AppID: cfg.GitHubAppID, AppKey: key})
+	if err := reg.Load(m); err != nil {
+		return nil, err
+	}
+	return reg, nil
+}
+
+// logIdentities says which GitHub identity each credential acts as.
+func logIdentities(ctx context.Context, reg *creds.Registry, log *slog.Logger) error {
+	var errs []error
+	reg.Each(func(name string, c *github.Client) {
+		if creds.IsApp(name) {
+			log.Info("github credentials", "credentials", name, "kind", "app installation")
+			return
+		}
+		login, err := c.Viewer(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("credentials %s: %w", name, err))
+			return
+		}
+		log.Info("github credentials", "credentials", name, "kind", "token", "login", login)
+	})
+	return errors.Join(errs...)
+}
+
+// warnMixedClients warns when one credential serves projects of different Jiku clients:
+// credentials are per client.
+func warnMixedClients(ctx context.Context, c *jikugo.Client, m *mapping.File, log *slog.Logger) {
+	byCred := map[string]map[int64]bool{}
+	for _, p := range m.Projects {
+		item, err := c.Get(ctx, "projects", jikugo.Get{ID: p.JikuProject, Fields: []string{"id", "clientId"}})
+		if err != nil {
+			log.Warn("cannot read a mapped project in Jiku", "project", p.JikuProject, "error", err)
+			continue
+		}
+		var pr struct {
+			ClientID *int64 `json:"clientId"`
+		}
+		if item.Into(&pr) != nil || pr.ClientID == nil {
+			continue
+		}
+		if byCred[p.CredentialName()] == nil {
+			byCred[p.CredentialName()] = map[int64]bool{}
+		}
+		byCred[p.CredentialName()][*pr.ClientID] = true
+	}
+	for name, clients := range byCred {
+		if len(clients) > 1 {
+			log.Warn("one GitHub credential serves projects of different Jiku clients", "credentials", name, "jikuClients", len(clients))
+		}
+	}
 }
 
 // connect opens the bus as the connector's machine user and waits until core knows it: on the
@@ -163,15 +218,13 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	gh, err := newGitHub(cfg, log)
+	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
 		return err
 	}
-	login, err := gh.Viewer(ctx)
-	if err != nil {
-		return fmt.Errorf("GitHub token: %w", err)
+	if err := logIdentities(ctx, reg, log); err != nil {
+		return err
 	}
-	log.Info("github identity", "login", login)
 
 	h := health.New()
 	mux := h.Mux()
@@ -200,9 +253,20 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return err
 	}
 	jk := jiku.New(c)
-	eng := engine.New(engine.Options{GitHub: gh, Jiku: jk, Store: st, Config: m, Logger: log})
+	warnMixedClients(ctx, c, m, log)
+	var eng *engine.Engine
+	ghFor := func(p *mapping.Project) engine.GitHub { return reg.For(eng.Config(), p) }
+	eng = engine.New(engine.Options{GitHubFor: ghFor, Jiku: jk, Store: st, Config: m, Logger: log})
 	w := worker.New(worker.Options{
-		Engine: eng, GitHub: gh, Jiku: jk, Store: st, Logger: log,
+		Engine: eng, Jiku: jk, Store: st, Logger: log,
+		GitHubFor: func(p *mapping.Project) worker.GitHub { return reg.For(eng.Config(), p) },
+		OnReload: func(f *mapping.File) error {
+			if err := reg.Load(f); err != nil {
+				return err
+			}
+			warnMixedClients(ctx, c, f, log)
+			return nil
+		},
 		Events:               worker.JikuEvents{Client: c, Durable: cfg.EventsDurable},
 		PollInterval:         cfg.PollInterval,
 		ReconcileInterval:    cfg.ReconcileInterval,
@@ -215,7 +279,11 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if cfg.WebhookSecret != "" {
 		mux.Handle("POST /webhooks/github", &webhook.Handler{Secret: []byte(cfg.WebhookSecret), Log: log, Enqueue: func(t webhook.Trigger) {
 			if t.Node != "" {
-				w.Enqueue(worker.Key{Kind: worker.IssueNode, Node: t.Node})
+				for _, p := range eng.Config().Projects {
+					if p.GithubProject != "" && p.GithubProject == t.ProjectNode {
+						w.Enqueue(worker.Key{Kind: worker.IssueNode, Node: t.Node, Project: p.JikuProject})
+					}
+				}
 				return
 			}
 			w.Enqueue(worker.Key{Kind: worker.Issue, Repo: t.Repo, Number: t.Number})
@@ -246,7 +314,7 @@ func checkConfig(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	if err != nil {
 		return err
 	}
-	gh, err := newGitHub(cfg, log)
+	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
 		return err
 	}
@@ -260,7 +328,13 @@ func checkConfig(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 		}
 	}
 	fmt.Printf("Mapeo %s: válido (%d proyectos)\n", cfg.MappingFile, len(m.Projects))
-	if n := checkconfig.Render(os.Stdout, checkconfig.Run(ctx, gh, m, only)); n > 0 {
+	var findings []checkconfig.Finding
+	for _, p := range m.Projects {
+		if only == 0 || p.JikuProject == only {
+			findings = append(findings, checkconfig.Run(ctx, reg.For(m, p), m, p.JikuProject)...)
+		}
+	}
+	if n := checkconfig.Render(os.Stdout, findings); n > 0 {
 		return fmt.Errorf("%d errors in the mapping", n)
 	}
 	return nil
@@ -296,10 +370,11 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	if p == nil {
 		return fmt.Errorf("project %d is not in %s", projectID, cfg.MappingFile)
 	}
-	gh, err := newGitHub(cfg, log)
+	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
 		return err
 	}
+	gh := reg.For(m, p)
 	c, err := connect(ctx, cfg, log)
 	if err != nil {
 		return err
@@ -344,10 +419,11 @@ func verifyCmd(ctx context.Context, cfg config.Config, log *slog.Logger, args []
 	if p == nil {
 		return fmt.Errorf("project %d is not in %s", projectID, cfg.MappingFile)
 	}
-	gh, err := newGitHub(cfg, log)
+	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
 		return err
 	}
+	gh := reg.For(m, p)
 	c, err := connect(ctx, cfg, log)
 	if err != nil {
 		return err

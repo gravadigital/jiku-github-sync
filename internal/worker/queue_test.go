@@ -32,3 +32,26 @@ func TestQueueLimit(t *testing.T) {
 		t.Fatal("a key already waiting is always accepted")
 	}
 }
+
+func TestUrgentGoesBeforeBackgroundAndPromotes(t *testing.T) {
+	q := NewQueue(0)
+	for i := int64(1); i <= 3; i++ {
+		q.PushBackground(Key{Kind: Requirement, ReqID: i})
+	}
+	q.Push(Key{Kind: Requirement, ReqID: 9})
+	q.Push(Key{Kind: Requirement, ReqID: 2}) // waiting in the background, now it changed
+	var got []int64
+	for {
+		k, ok := q.Pop()
+		if !ok {
+			break
+		}
+		got = append(got, k.ReqID)
+	}
+	want := []int64{9, 2, 1, 3}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order %v, want %v", got, want)
+		}
+	}
+}

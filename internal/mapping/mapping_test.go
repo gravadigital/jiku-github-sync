@@ -124,3 +124,48 @@ func TestInitialSyncMode(t *testing.T) {
 		t.Fatal("there are no manual links: the key must be rejected")
 	}
 }
+
+func TestCredentials(t *testing.T) {
+	ok := `
+credentials:
+  client-a: { token: { env: GITHUB_TOKEN_A } }
+  client-b: { app: { installations: { org-b: 42 } } }
+projects:
+  - { jikuProject: 1, repos: [org-a/x, other-a/y], defaultRepo: org-a/x, credentials: client-a }
+  - { jikuProject: 2, repos: [ORG-B/z], defaultRepo: ORG-B/z, credentials: client-b }
+`
+	f, err := Parse([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Project(1).CredentialName() != "client-a" {
+		t.Fatal("named credential")
+	}
+	if id, found := f.Credentials["client-b"].App.Installation("org-b"); !found || id != 42 {
+		t.Fatal("installation lookup is case-insensitive")
+	}
+	if def, _ := Parse([]byte("projects:\n  - { jikuProject: 1, repos: [a/b], defaultRepo: a/b }\n")); def.Project(1).CredentialName() != DefaultCredential {
+		t.Fatal("without a credentials section the default (GITHUB_TOKEN) is used")
+	}
+	bad := `
+credentials:
+  both: { token: { env: A }, app: { installations: { o: 1 } } }
+  envfile: { token: { env: A, file: /x } }
+  app-b: { app: { installations: { org-b: 7 } } }
+projects:
+  - { jikuProject: 1, repos: [a/b], defaultRepo: a/b }
+  - { jikuProject: 2, repos: [a/c], defaultRepo: a/c, credentials: nope }
+  - { jikuProject: 3, repos: [org-b/x, org-c/y], defaultRepo: org-b/x, credentials: app-b }
+  - { jikuProject: 4, repos: [org-d/x], defaultRepo: org-d/x, credentials: app-b }
+`
+	_, err = Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("expected errors")
+	}
+	for _, want := range []string{"exactly one of token or app", "exactly one of env or file", "projects[0].credentials is required",
+		`"nope" does not exist`, "all repos must be in one organization", "no installation for org-d"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in:\n%v", want, err)
+		}
+	}
+}

@@ -28,9 +28,14 @@ type Config struct {
 	JikuTimeout   time.Duration
 
 	// GitHub.
-	GitHubToken   string
-	GitHubAPIURL  string
-	WebhookSecret string
+	// GitHubToken is the default credential: the one of projects that name none.
+	GitHubToken string
+	// The connector's GitHub App, for `app` credentials.
+	GitHubAppID      string
+	GitHubAppKeyFile string
+	GitHubAppKeyB64  string
+	GitHubAPIURL     string
+	WebhookSecret    string
 
 	// Sync.
 	MappingFile       string
@@ -61,9 +66,12 @@ func FromEnv() Config {
 		JikuKeyB64:    os.Getenv("JIKU_KEY_B64"),
 		JikuTimeout:   duration("JIKU_TIMEOUT", 15*time.Second),
 
-		GitHubToken:   os.Getenv("GITHUB_TOKEN"),
-		GitHubAPIURL:  getenv("GITHUB_API_URL", "https://api.github.com"),
-		WebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubToken:      os.Getenv("GITHUB_TOKEN"),
+		GitHubAppID:      os.Getenv("GITHUB_APP_ID"),
+		GitHubAppKeyFile: os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"),
+		GitHubAppKeyB64:  os.Getenv("GITHUB_APP_PRIVATE_KEY_B64"),
+		GitHubAPIURL:     getenv("GITHUB_API_URL", "https://api.github.com"),
+		WebhookSecret:    os.Getenv("GITHUB_WEBHOOK_SECRET"),
 
 		MappingFile:       getenv("SYNC_CONFIG", "config.yaml"),
 		PollInterval:      duration("SYNC_POLL_INTERVAL", time.Minute),
@@ -107,12 +115,19 @@ func (c Config) ValidateJiku() error {
 	return errors.Join(errs...)
 }
 
-// ValidateGitHub checks what talking to GitHub needs.
-func (c Config) ValidateGitHub() error {
-	if c.GitHubToken == "" {
-		return errors.New("GITHUB_TOKEN is required")
+// AppKey returns the GitHub App's private key (nil when no App is configured).
+func (c Config) AppKey() ([]byte, error) {
+	if c.GitHubAppKeyB64 != "" {
+		b, err := base64.StdEncoding.DecodeString(c.GitHubAppKeyB64)
+		if err != nil {
+			return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_B64 is not base64: %w", err)
+		}
+		return b, nil
 	}
-	return nil
+	if c.GitHubAppKeyFile != "" {
+		return os.ReadFile(c.GitHubAppKeyFile)
+	}
+	return nil, nil
 }
 
 func getenv(key, fallback string) string {

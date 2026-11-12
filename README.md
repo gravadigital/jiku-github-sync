@@ -60,6 +60,9 @@ or out-of-order triggers find nothing to do, and the connector's own writes neve
    └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+- **Two lanes:** what just changed (a Jiku event, a webhook, a poll that saw a change) is always
+  synced before background work (reconciliation, verification, initial sync), so a sweep over
+  many pairs never delays a fresh change.
 - **Anti-loop / recovery:** a hidden marker on everything the connector writes on GitHub
   (`<!-- jiku-github-sync:… -->`), the attribution link on everything it writes in Jiku, and a
   "pending" record before every creation, so a crash between creating something and storing its
@@ -69,6 +72,27 @@ or out-of-order triggers find nothing to do, and the connector's own writes neve
   `github-project-automation` are not taken as a person's decision.
 - **GitHub limits:** content-creating writes are spaced (`SYNC_WRITE_INTERVAL`) and rate-limit
   answers are waited out.
+
+## GitHub credentials: one per client
+
+Each client's GitHub access is a named entry of the mapping's `credentials`, and each project
+names its client's. The mapping only says where a secret is read from — an environment variable
+or a file (a Docker secret) — never the secret itself.
+
+- **Token** (`token: { env: … }` or `{ file: … }`): a user or service account token with `repo` +
+  `project`. Everything appears under that account.
+- **GitHub App** (`app: { installations: { <org>: <id> } }`): the connector's App
+  (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` / `_B64`), installed on each of the client's
+  organizations. Installation tokens are minted and renewed by the service; writes appear as the
+  App's bot. An installation only reaches its organization, so a project using it keeps its repos
+  and Project in one organization.
+- Without a `credentials` section every project uses `GITHUB_TOKEN`; with one, every project must
+  name its credentials.
+- Each credential is its own GitHub client, with its own write spacing and rate-limit waits
+  (GitHub counts limits per token / per installation): one client cannot slow another down.
+- On start the service logs which identity each credential acts as, and warns if one credential
+  serves projects of different Jiku clients. A reload whose credentials cannot be loaded (a
+  missing variable or file) is rejected and the previous mapping keeps running.
 
 ## The mapping file
 

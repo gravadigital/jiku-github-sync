@@ -28,10 +28,10 @@ var ErrNotFound = errors.New("github: not found")
 
 // Client talks to the GitHub API with a token.
 type Client struct {
-	base  string
-	token string
-	http  *http.Client
-	log   *slog.Logger
+	base string
+	auth TokenSource
+	http *http.Client
+	log  *slog.Logger
 
 	// writeInterval is the minimum gap between two content-creating requests.
 	writeInterval time.Duration
@@ -45,8 +45,10 @@ type Client struct {
 
 // Options configures a Client.
 type Options struct {
-	BaseURL       string
+	BaseURL string
+	// Token is a fixed token; Auth (an App installation, say) takes precedence over it.
 	Token         string
+	Auth          TokenSource
 	WriteInterval time.Duration
 	HTTPClient    *http.Client
 	Logger        *slog.Logger
@@ -58,7 +60,7 @@ type Options struct {
 func New(o Options) *Client {
 	c := &Client{
 		base:          strings.TrimRight(o.BaseURL, "/"),
-		token:         o.Token,
+		auth:          o.Auth,
 		http:          o.HTTPClient,
 		log:           o.Logger,
 		writeInterval: o.WriteInterval,
@@ -67,6 +69,9 @@ func New(o Options) *Client {
 	}
 	if c.base == "" {
 		c.base = DefaultBaseURL
+	}
+	if c.auth == nil && o.Token != "" {
+		c.auth = StaticToken(o.Token)
 	}
 	if c.http == nil {
 		c.http = &http.Client{Timeout: 30 * time.Second}
@@ -124,8 +129,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any,
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 		req.Header.Set("User-Agent", "jiku-github-sync")
-		if c.token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.token)
+		if c.auth != nil {
+			tok, err := c.auth.Token(ctx)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")

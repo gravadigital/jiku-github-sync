@@ -41,3 +41,8 @@ lint and the tests, and only then publishes `gravadigital/jiku-github-sync` to D
   periodic reconciliation, HMAC-verified webhook receiver, `/healthz` and `/readyz`.
 - `sync-inicial`: one-time sync of what already exists, with a reviewable plan and `--dry-run`.
 - State in the connector's space of Jiku's KV (no Jiku change, no tags).
+- GitHub credentials per client in the mapping (token from an environment variable or a file, or
+  the connector's GitHub App with one installation per organization); each credential is its own
+  client with its own rate limits; reloads with unusable credentials are rejected.
+- The service runs the initial sync (`initialSync: plan | apply | off`), the mapping check and a
+  periodic verification itself; fresh changes are synced before background work.

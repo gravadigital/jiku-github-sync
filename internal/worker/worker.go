@@ -48,8 +48,9 @@ type Event struct {
 
 // Options configures a Worker.
 type Options struct {
-	Engine            *engine.Engine
-	GitHub            GitHub
+	Engine *engine.Engine
+	// GitHubFor returns the GitHub client of a project's credentials.
+	GitHubFor         func(*mapping.Project) GitHub
 	Jiku              jiku.API
 	Store             *state.Store
 	Events            Events // nil: no event stream (polling and reconciliation only)
@@ -58,6 +59,9 @@ type Options struct {
 	ReconcileInterval time.Duration
 	MappingFile       string
 	ConfigReload      time.Duration
+	// OnReload is called with a new, valid mapping before it is applied (to load its
+	// credentials); an error keeps the previous mapping.
+	OnReload func(*mapping.File) error
 	// WriteInterval is SYNC_WRITE_INTERVAL, for the initial sync's estimate.
 	WriteInterval time.Duration
 	// VerifyAfterReconcile logs a verification of every project after each reconciliation.
@@ -86,10 +90,18 @@ func New(o Options) *Worker {
 	return w
 }
 
-// Enqueue adds something to sync (used by the webhook receiver).
+// Enqueue adds something that just changed (Jiku events, webhooks, polls): it goes before any
+// background work.
 func (w *Worker) Enqueue(k Key) {
 	if !w.q.Push(k) {
 		w.log.Warn("queue full: dropping a trigger (the reconciliation will catch up)", "key", k.id())
+	}
+}
+
+// enqueueBackground adds background work (reconciliation, verification, initial sync).
+func (w *Worker) enqueueBackground(k Key) {
+	if !w.q.PushBackground(k) {
+		w.log.Warn("queue full: dropping background work (the next reconciliation will retry)", "key", k.id())
 	}
 }
 
@@ -138,7 +150,7 @@ func (w *Worker) startProjects(ctx context.Context) {
 		}
 		w.log.Info("watching project", "project", p.JikuProject, "repos", p.Repos, "githubProject", p.GithubProject, "since", started)
 		for _, r := range p.Repos {
-			repo, err := w.o.GitHub.GetRepo(ctx, r)
+			repo, err := w.o.GitHubFor(p).GetRepo(ctx, r)
 			if err != nil {
 				w.log.Error("cannot read a mapped repo", "repo", r, "error", err)
 				continue
@@ -150,7 +162,7 @@ func (w *Worker) startProjects(ctx context.Context) {
 		}
 		w.checkConfig(ctx, p)
 		if p.InitialSyncMode() != mapping.InitialSyncOff {
-			w.Enqueue(Key{Kind: InitialSync, Project: p.JikuProject})
+			w.enqueueBackground(Key{Kind: InitialSync, Project: p.JikuProject})
 		}
 	}
 }
@@ -159,7 +171,7 @@ func (w *Worker) startProjects(ctx context.Context) {
 // check-config command prints), on startup and on every reload of the mapping.
 func (w *Worker) checkConfig(ctx context.Context, p *mapping.Project) {
 	errs, warns := 0, 0
-	for _, f := range checkconfig.Run(ctx, w.o.GitHub, &mapping.File{Projects: []*mapping.Project{p}}, p.JikuProject) {
+	for _, f := range checkconfig.Run(ctx, w.o.GitHubFor(p), &mapping.File{Projects: []*mapping.Project{p}}, p.JikuProject) {
 		switch f.Level {
 		case checkconfig.Error:
 			errs++
@@ -194,7 +206,7 @@ func (w *Worker) processLoop(ctx context.Context) {
 		case Issue:
 			err = w.o.Engine.HandleIssue(ctx, k.Repo, k.Number)
 		case IssueNode:
-			err = w.o.Engine.HandleIssueNode(ctx, k.Node)
+			err = w.o.Engine.HandleIssueNode(ctx, k.Project, k.Node)
 		case InitialSync:
 			err = w.initialSync(ctx, k.Project)
 		case Verify:
@@ -256,6 +268,7 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 	if err != nil {
 		return err
 	}
+	gh := w.o.GitHubFor(p)
 	issueCur := map[string]time.Time{}
 	commentCur := map[string]time.Time{}
 	for _, repo := range p.Repos {
@@ -263,7 +276,7 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 		if since.IsZero() {
 			since = ps.StartedAt.Add(-time.Minute)
 		}
-		issues, err := w.o.GitHub.ListIssues(ctx, repo, since.Add(-cursorSkew), "all")
+		issues, err := gh.ListIssues(ctx, repo, since.Add(-cursorSkew), "all")
 		if err != nil {
 			return err
 		}
@@ -280,7 +293,7 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 		if csince.IsZero() {
 			csince = ps.StartedAt.Add(-time.Minute)
 		}
-		comments, err := w.o.GitHub.ListRepoComments(ctx, repo, csince.Add(-cursorSkew))
+		comments, err := gh.ListRepoComments(ctx, repo, csince.Add(-cursorSkew))
 		if err != nil {
 			return err
 		}
@@ -297,15 +310,21 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 	}
 	// Project fields do not touch the issue's updated_at: compare each item's values instead.
 	if p.GithubProject != "" {
-		items, err := w.o.GitHub.ListItems(ctx, p.GithubProject)
+		items, err := gh.ListItems(ctx, p.GithubProject)
 		if err != nil {
 			return err
 		}
 		for _, it := range items {
 			h := valuesHash(it.Values)
-			if prev, ok := w.items.Load(it.ID); !ok || prev.(string) != h {
+			prev, seen := w.items.Load(it.ID)
+			if !seen || prev.(string) != h {
 				w.items.Store(it.ID, h)
-				w.Enqueue(Key{Kind: IssueNode, Node: it.ContentNodeID})
+				k := Key{Kind: IssueNode, Node: it.ContentNodeID, Project: p.JikuProject}
+				if seen {
+					w.Enqueue(k) // it changed since the last poll
+				} else {
+					w.enqueueBackground(k) // first sight after a start: nothing says it changed
+				}
 			}
 		}
 	}
@@ -361,7 +380,7 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 		linked := map[int64]bool{}
 		for _, id := range ps.Links {
 			linked[id] = true
-			w.Enqueue(Key{Kind: Requirement, ReqID: id})
+			w.enqueueBackground(Key{Kind: Requirement, ReqID: id})
 			n++
 		}
 		reqs, err := w.o.Jiku.ListRequirements(ctx, p.JikuProject, map[string]any{
@@ -374,7 +393,7 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 		}
 		for _, r := range reqs {
 			if !linked[r.ID] {
-				w.Enqueue(Key{Kind: Requirement, ReqID: r.ID})
+				w.enqueueBackground(Key{Kind: Requirement, ReqID: r.ID})
 				n++
 			}
 		}
@@ -383,7 +402,7 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 	if w.o.VerifyAfterReconcile {
 		// Queued after the pairs: it runs once they have been synced.
 		for _, p := range w.o.Engine.Config().Projects {
-			w.Enqueue(Key{Kind: Verify, Project: p.JikuProject})
+			w.enqueueBackground(Key{Kind: Verify, Project: p.JikuProject})
 		}
 	}
 	return errors.Join(errs...)
@@ -443,6 +462,12 @@ func (w *Worker) reloadLoop(ctx context.Context) {
 		if err != nil {
 			w.log.Error("mapping file changed but is invalid: keeping the previous one", "error", err)
 			continue
+		}
+		if w.o.OnReload != nil {
+			if err := w.o.OnReload(f); err != nil {
+				w.log.Error("mapping changed but its credentials cannot be loaded: keeping the previous mapping", "error", err)
+				continue
+			}
 		}
 		w.o.Engine.SetConfig(f)
 		w.log.Info("mapping reloaded", "projects", len(f.Projects))

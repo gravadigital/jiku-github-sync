@@ -122,7 +122,7 @@ func (e *Engine) ExportRequirement(ctx context.Context, p *mapping.Project, req 
 	log := e.log.With("requirement", req.ID, "repo", p.DefaultRepo)
 
 	if pend, err := e.st.PendingRequirement(ctx, req.ID); err == nil {
-		is, err := e.findCreatedIssue(ctx, p.DefaultRepo, req.ID, pend)
+		is, err := e.findCreatedIssue(ctx, p, p.DefaultRepo, req.ID, pend)
 		if err != nil {
 			return nil, err
 		}
@@ -141,12 +141,12 @@ func (e *Engine) ExportRequirement(ctx context.Context, p *mapping.Project, req 
 	if err := e.st.SetPendingRequirement(ctx, req.ID, state.Pending{At: e.now().UTC(), Title: req.Title}); err != nil {
 		return nil, err
 	}
-	is, err := e.gh.CreateIssue(ctx, p.DefaultRepo, in)
+	is, err := e.gh(p).CreateIssue(ctx, p.DefaultRepo, in)
 	if err != nil && in.Type != nil {
 		// The org may not have that issue type: create it without, and log why.
 		log.Warn("creating the issue with its type failed; retrying without type", "type", *in.Type, "error", err)
 		in.Type = nil
-		is, err = e.gh.CreateIssue(ctx, p.DefaultRepo, in)
+		is, err = e.gh(p).CreateIssue(ctx, p.DefaultRepo, in)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("creating the issue of requirement %d: %w", req.ID, err)
@@ -176,8 +176,8 @@ func (e *Engine) linkExported(ctx context.Context, p *mapping.Project, req *jiku
 
 // findCreatedIssue looks for the issue the connector created for a requirement after a pending
 // record, by its marker.
-func (e *Engine) findCreatedIssue(ctx context.Context, repo string, reqID int64, pend *state.Pending) (*github.Issue, error) {
-	issues, err := e.gh.ListIssues(ctx, repo, pend.At.Add(-time.Minute), "all")
+func (e *Engine) findCreatedIssue(ctx context.Context, p *mapping.Project, repo string, reqID int64, pend *state.Pending) (*github.Issue, error) {
+	issues, err := e.gh(p).ListIssues(ctx, repo, pend.At.Add(-time.Minute), "all")
 	if err != nil {
 		return nil, err
 	}

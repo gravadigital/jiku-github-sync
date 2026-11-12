@@ -37,6 +37,9 @@ OPT_CRITICAL=${E2E_OPT_CRITICAL:-Critical}
 TYPE_BUG=${E2E_TYPE_BUG:-Bug}
 TYPE_FEATURE=${E2E_TYPE_FEATURE:-Feature}
 RUN=$(date +%s)
+# Only issues created during this run count: a test environment whose Jiku was reset reuses
+# requirement ids, and old closed issues may carry the same marker.
+RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  \033[32mok\033[0m   %s\n' "$*"; }
@@ -80,9 +83,10 @@ set_status() { # <issue number> <option name>
   ghx api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
     -f p="$E2E_GH_PROJECT" -f i="$item" -f f="$field" -f o="$opt" >/dev/null
 }
-issue_of_req() { # finds the issue created for a requirement by its marker
+issue_of_req() { # finds the issue created for a requirement by its marker, during this run
   ghx api "repos/$E2E_REPO/issues?state=all&per_page=50&sort=created&direction=desc" \
-    | jq -r --arg m "jiku-github-sync:requirement=$1 -->" '.[]|select(.body!=null and (.body|contains($m)))|.number' | head -1
+    | jq -r --arg m "jiku-github-sync:requirement=$1 -->" --arg s "$RUN_START" \
+      '.[]|select(.created_at >= $s and .body!=null and (.body|contains($m)))|.number' | head -1
 }
 req_of_issue() { # finds the requirement created for an issue by title in the project
   jk query requirements.list --filter "projectId=$E2E_JIKU_PROJECT" --all -o json | jq -r --arg t "$1" '.[]|select(.title==$t)|.id' | head -1

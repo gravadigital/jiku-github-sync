@@ -26,8 +26,43 @@ var (
 
 // File is the whole configuration file.
 type File struct {
+	// Credentials are the GitHub credentials, one per client, by name. Without this section every
+	// project uses the default credential (GITHUB_TOKEN).
+	Credentials   map[string]*Credential   `yaml:"credentials"`
 	FieldMappings map[string]*FieldMapping `yaml:"fieldMappings"`
 	Projects      []*Project               `yaml:"projects"`
+}
+
+// DefaultCredential is the credential of projects that name none: GITHUB_TOKEN.
+const DefaultCredential = "default"
+
+// Credential is how the connector reaches a client's GitHub: a token, or the installations of
+// the connector's GitHub App on the client's organizations. The secrets themselves never go in
+// this file: it only says where to read them.
+type Credential struct {
+	Token *Secret        `yaml:"token"`
+	App   *AppCredential `yaml:"app"`
+}
+
+// Secret is read from an environment variable or a file (a Docker secret).
+type Secret struct {
+	Env  string `yaml:"env"`
+	File string `yaml:"file"`
+}
+
+// AppCredential is the GitHub App's installations on a client's organizations (the App's id and
+// private key are the service's, from the environment). An installation token only reaches its
+// own organization, so a project using it must keep its repos and Project in one organization.
+type AppCredential struct {
+	Installations map[string]int64 `yaml:"installations"` // organization -> installation id
+}
+
+// CredentialName returns the project's credential, DefaultCredential when it names none.
+func (p *Project) CredentialName() string {
+	if p.Credentials == "" {
+		return DefaultCredential
+	}
+	return p.Credentials
 }
 
 // Project maps one Jiku project to its GitHub side.
@@ -42,6 +77,8 @@ type Project struct {
 	// GithubProject is the node id of the Project v2 the Status (and the other fields) come from.
 	// Optional: without it only open/closed is synced.
 	GithubProject string `yaml:"githubProject"`
+	// Credentials names an entry of File.Credentials: the client's GitHub credentials.
+	Credentials string `yaml:"credentials"`
 	// FieldMapping names a preset of File.FieldMappings. Ignored without GithubProject, except
 	// for the issue type, which lives on the issue.
 	FieldMapping string `yaml:"fieldMapping"`
@@ -161,6 +198,26 @@ func (f *File) validate() error {
 		}
 		errs = append(errs, fm.validate("fieldMappings."+name)...)
 	}
+	for name, c := range f.Credentials {
+		at := "credentials." + name
+		switch {
+		case c == nil || (c.Token == nil) == (c.App == nil):
+			errs = append(errs, fmt.Errorf("%s needs exactly one of token or app", at))
+		case c.Token != nil && (c.Token.Env == "") == (c.Token.File == ""):
+			errs = append(errs, fmt.Errorf("%s.token needs exactly one of env or file", at))
+		case c.App != nil && len(c.App.Installations) == 0:
+			errs = append(errs, fmt.Errorf("%s.app.installations needs at least one organization", at))
+		case c.App != nil:
+			for org, id := range c.App.Installations {
+				if id <= 0 {
+					errs = append(errs, fmt.Errorf("%s.app.installations[%s]: invalid installation id", at, org))
+				}
+			}
+		}
+		if name == DefaultCredential {
+			errs = append(errs, fmt.Errorf("%s: %q is reserved for GITHUB_TOKEN", at, DefaultCredential))
+		}
+	}
 	seen := map[int64]bool{}
 	repoOwner := map[string]int64{}
 	for i, p := range f.Projects {
@@ -187,6 +244,25 @@ func (f *File) validate() error {
 				errs = append(errs, fmt.Errorf("%s.repos: %s is already mapped to project %d", at, r, other))
 			}
 			repoOwner[strings.ToLower(r)] = p.JikuProject
+		}
+		switch {
+		case len(f.Credentials) > 0 && p.Credentials == "":
+			errs = append(errs, fmt.Errorf("%s.credentials is required: with a credentials section every project names its client's", at))
+		case p.Credentials != "":
+			c, ok := f.Credentials[p.Credentials]
+			if !ok {
+				errs = append(errs, fmt.Errorf("%s.credentials: %q does not exist", at, p.Credentials))
+			} else if c != nil && c.App != nil {
+				for _, r := range p.Repos {
+					if !strings.EqualFold(Owner(r), Owner(p.DefaultRepo)) {
+						errs = append(errs, fmt.Errorf("%s: with a GitHub App credential all repos must be in one organization (%s and %s)", at, Owner(r), Owner(p.DefaultRepo)))
+						break
+					}
+				}
+				if _, ok := c.App.Installation(Owner(p.DefaultRepo)); !ok {
+					errs = append(errs, fmt.Errorf("%s: credentials %q has no installation for %s", at, p.Credentials, Owner(p.DefaultRepo)))
+				}
+			}
 		}
 		if p.DefaultRepo == "" {
 			errs = append(errs, fmt.Errorf("%s.defaultRepo is required", at))
@@ -422,4 +498,14 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// Installation returns the installation id for an organization (case-insensitive, as GitHub).
+func (a *AppCredential) Installation(org string) (int64, bool) {
+	for o, id := range a.Installations {
+		if strings.EqualFold(o, org) {
+			return id, true
+		}
+	}
+	return 0, false
 }

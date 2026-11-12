@@ -46,10 +46,11 @@ type GitHub interface {
 
 // Engine syncs requirements and issues.
 type Engine struct {
-	gh  GitHub
-	jk  jiku.API
-	st  *state.Store
-	log *slog.Logger
+	// ghFor returns the GitHub client of a project: its client's credentials.
+	ghFor func(*mapping.Project) GitHub
+	jk    jiku.API
+	st    *state.Store
+	log   *slog.Logger
 
 	cfgMu sync.RWMutex
 	cfg   *mapping.File
@@ -71,7 +72,10 @@ type schemaEntry struct {
 
 // Options configures an Engine.
 type Options struct {
-	GitHub    GitHub
+	// GitHub is the client of every project, when there is a single credential (tests, trials).
+	GitHub GitHub
+	// GitHubFor returns the client of a project's credentials; it takes precedence over GitHub.
+	GitHubFor func(*mapping.Project) GitHub
 	Jiku      jiku.API
 	Store     *state.Store
 	Config    *mapping.File
@@ -83,9 +87,13 @@ type Options struct {
 // New builds an Engine.
 func New(o Options) *Engine {
 	e := &Engine{
-		gh: o.GitHub, jk: o.Jiku, st: o.Store, log: o.Logger, cfg: o.Config,
+		ghFor: o.GitHubFor, jk: o.Jiku, st: o.Store, log: o.Logger, cfg: o.Config,
 		schemas: map[string]schemaEntry{}, schemaTTL: o.SchemaTTL, now: o.Now,
 		ItemSettle: DefaultItemSettle,
+	}
+	if e.ghFor == nil {
+		gh := o.GitHub
+		e.ghFor = func(*mapping.Project) GitHub { return gh }
 	}
 	if e.log == nil {
 		e.log = slog.Default()
@@ -121,14 +129,18 @@ func (e *Engine) InvalidateSchemas() {
 	e.schemaMu.Unlock()
 }
 
-func (e *Engine) schema(ctx context.Context, projectID string) (*github.ProjectSchema, error) {
+// gh is the GitHub client of a project.
+func (e *Engine) gh(p *mapping.Project) GitHub { return e.ghFor(p) }
+
+func (e *Engine) schema(ctx context.Context, p *mapping.Project) (*github.ProjectSchema, error) {
+	projectID := p.GithubProject
 	e.schemaMu.Lock()
 	ent, ok := e.schemas[projectID]
 	e.schemaMu.Unlock()
 	if ok && e.now().Sub(ent.at) < e.schemaTTL {
 		return ent.s, nil
 	}
-	s, err := e.gh.ProjectSchema(ctx, projectID)
+	s, err := e.gh(p).ProjectSchema(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -185,10 +197,14 @@ func (e *Engine) HandleRequirement(ctx context.Context, reqID int64, becamePubli
 	return err
 }
 
-// HandleIssue syncs one issue: its pair if it has one, or the creation of its requirement when it
-// qualifies (open, in a mapped repo, born after the connector started watching).
+// HandleIssue syncs one issue of a mapped repo: its pair if it has one, or the creation of its
+// requirement when it qualifies (open, born after the connector started watching).
 func (e *Engine) HandleIssue(ctx context.Context, repo string, number int) error {
-	is, err := e.gh.GetIssue(ctx, repo, number)
+	p := e.Config().ProjectForRepo(repo)
+	if p == nil {
+		return nil
+	}
+	is, err := e.gh(p).GetIssue(ctx, repo, number)
 	if errors.Is(err, github.ErrNotFound) {
 		return nil
 	}
@@ -198,12 +214,17 @@ func (e *Engine) HandleIssue(ctx context.Context, repo string, number int) error
 	return e.handleIssue(ctx, is)
 }
 
-// HandleIssueNode is HandleIssue by node id (webhooks for Project items carry only that).
-func (e *Engine) HandleIssueNode(ctx context.Context, nodeID string) error {
+// HandleIssueNode is HandleIssue by node id, for an item of the given Jiku project's GitHub
+// Project (Project item polls and webhooks carry only the node id).
+func (e *Engine) HandleIssueNode(ctx context.Context, jikuProject int64, nodeID string) error {
 	if l, err := e.st.LinkByIssue(ctx, nodeID); err == nil {
 		return e.SyncLink(ctx, l, SyncOptions{})
 	}
-	repo, num, err := e.gh.IssueRef(ctx, nodeID)
+	p := e.Config().Project(jikuProject)
+	if p == nil {
+		return nil
+	}
+	repo, num, err := e.gh(p).IssueRef(ctx, nodeID)
 	if errors.Is(err, github.ErrNotFound) {
 		return nil
 	}

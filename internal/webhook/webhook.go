@@ -20,6 +20,8 @@ type Trigger struct {
 	Repo   string
 	Number int
 	Node   string // issue node id, for Project item events
+	// ProjectNode is the Project v2 node id of a Project item event.
+	ProjectNode string
 }
 
 // Handler verifies and parses deliveries.
@@ -112,6 +114,7 @@ func Parse(event string, body []byte) (Trigger, bool, error) {
 			ProjectsV2Item struct {
 				ContentNodeID string `json:"content_node_id"`
 				ContentType   string `json:"content_type"`
+				ProjectNodeID string `json:"project_node_id"`
 			} `json:"projects_v2_item"`
 		}
 		if err := json.Unmarshal(body, &p); err != nil {
@@ -120,7 +123,7 @@ func Parse(event string, body []byte) (Trigger, bool, error) {
 		if p.ProjectsV2Item.ContentType != "Issue" || p.ProjectsV2Item.ContentNodeID == "" {
 			return Trigger{}, false, nil
 		}
-		return Trigger{Node: p.ProjectsV2Item.ContentNodeID}, true, nil
+		return Trigger{Node: p.ProjectsV2Item.ContentNodeID, ProjectNode: p.ProjectsV2Item.ProjectNodeID}, true, nil
 	}
 	return Trigger{}, false, nil
 }

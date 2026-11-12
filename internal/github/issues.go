@@ -136,6 +136,7 @@ func (c *Client) Viewer(ctx context.Context) (string, error) {
 
 // Repo is the subset of a repository the connector checks.
 type Repo struct {
+	ID         int64  `json:"id"`
 	FullName   string `json:"full_name"`
 	Visibility string `json:"visibility"`
 	Private    bool   `json:"private"`

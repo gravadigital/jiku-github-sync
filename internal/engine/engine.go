@@ -42,6 +42,11 @@ type GitHub interface {
 	SetSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error
 	ClearField(ctx context.Context, projectID, itemID, fieldID string) error
 	LastStatusChange(ctx context.Context, issueNodeID, projectID string) (*github.StatusChange, error)
+	// Attachments.
+	UploadAsset(ctx context.Context, repo, name, contentType string, data []byte) (string, error)
+	Download(ctx context.Context, url string) ([]byte, string, error)
+	IssueHTML(ctx context.Context, repo string, number int) (string, error)
+	CommentHTML(ctx context.Context, repo string, id int64) (string, error)
 }
 
 // Engine syncs requirements and issues.

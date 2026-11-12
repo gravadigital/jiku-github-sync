@@ -28,15 +28,19 @@ var ErrNotFound = errors.New("github: not found")
 
 // Client talks to the GitHub API with a token.
 type Client struct {
-	base string
-	auth TokenSource
-	http *http.Client
-	log  *slog.Logger
+	base    string
+	uploads string
+	auth    TokenSource
+	http    *http.Client
+	log     *slog.Logger
 
 	// writeInterval is the minimum gap between two content-creating requests.
 	writeInterval time.Duration
 	writeMu       sync.Mutex
 	lastWrite     time.Time
+
+	repoMu  sync.Mutex
+	repoIDs map[string]int64
 
 	// maxWait bounds how long a single call sleeps for a rate limit before failing.
 	maxWait time.Duration
@@ -54,6 +58,9 @@ type Options struct {
 	Logger        *slog.Logger
 	// MaxRateLimitWait bounds the sleep on a rate limit (default 5 minutes).
 	MaxRateLimitWait time.Duration
+	// UploadsURL is where attachments are uploaded (default: uploads.github.com for the public
+	// API, BaseURL otherwise).
+	UploadsURL string
 }
 
 // New builds a Client.
@@ -69,6 +76,13 @@ func New(o Options) *Client {
 	}
 	if c.base == "" {
 		c.base = DefaultBaseURL
+	}
+	c.uploads = strings.TrimRight(o.UploadsURL, "/")
+	if c.uploads == "" {
+		c.uploads = c.base
+		if c.base == DefaultBaseURL {
+			c.uploads = "https://uploads.github.com"
+		}
 	}
 	if c.auth == nil && o.Token != "" {
 		c.auth = StaticToken(o.Token)
@@ -105,6 +119,11 @@ func (e *APIError) Is(target error) bool {
 // do sends one request (with retries on rate limits) and decodes the JSON answer into out.
 // It returns the response headers, for pagination.
 func (c *Client) do(ctx context.Context, method, path string, body any, out any, creates bool) (http.Header, error) {
+	return c.doAccept(ctx, method, path, body, out, creates, "application/vnd.github+json")
+}
+
+// doAccept is do with another media type (e.g. the one that adds body_html).
+func (c *Client) doAccept(ctx context.Context, method, path string, body any, out any, creates bool, accept string) (http.Header, error) {
 	var payload []byte
 	if body != nil {
 		var err error
@@ -126,7 +145,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any,
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Accept", accept)
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 		req.Header.Set("User-Agent", "jiku-github-sync")
 		if c.auth != nil {

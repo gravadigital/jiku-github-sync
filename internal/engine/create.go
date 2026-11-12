@@ -31,7 +31,8 @@ func (e *Engine) ImportIssue(ctx context.Context, p *mapping.Project, is *github
 		}
 		log.Info("recovering the link of an issue created by the connector", "requirement", reqID)
 		l := &state.Link{ReqID: reqID, JikuProject: p.JikuProject, IssueNodeID: is.NodeID, Repo: is.Repo, Number: is.Number,
-			Last: state.Snapshot{Title: is.Title, BodyHash: text.Hash(is.Body), GHOpen: is.Open(), GHStateReason: is.StateReason}}
+			Last: state.Snapshot{Title: is.Title, GHOpen: is.Open(), GHStateReason: is.StateReason}}
+		l.Last.Bodies(text.Hash(is.Body), text.Hash(is.Body))
 		if err := e.st.SaveLink(ctx, l); err != nil {
 			return nil, err
 		}
@@ -47,15 +48,23 @@ func (e *Engine) ImportIssue(ctx context.Context, p *mapping.Project, is *github
 		}
 		if found != nil {
 			log.Info("recovering an interrupted import", "requirement", found.ID)
-			return e.linkImported(ctx, p, is, found, opts)
+			return e.linkImported(ctx, p, is, found, nil, opts)
 		}
 	} else if !errors.Is(err, state.ErrNotFound) {
 		return nil, err
 	}
 
+	// The attachments are copied before the requirement exists; a provisional link collects which
+	// files they became.
+	tmp := &state.Link{Repo: is.Repo, Number: is.Number}
+	desc, files, err := e.toJiku(ctx, p, tmp, is.Body, func() (string, error) { return e.gh(p).IssueHTML(ctx, is.Repo, is.Number) }, nil)
+	if err != nil {
+		return nil, err
+	}
 	in := jiku.NewRequirement{
 		Title:           is.Title,
-		Description:     text.Normalize(is.Body),
+		Description:     text.Normalize(desc),
+		FileIDs:         files,
 		ProjectID:       p.JikuProject,
 		VisibilityLevel: "public",
 	}
@@ -78,20 +87,22 @@ func (e *Engine) ImportIssue(ctx context.Context, p *mapping.Project, is *github
 	log.Info("requirement created from issue", "requirement", id)
 	req := &jiku.Requirement{ID: id, Title: in.Title, Description: in.Description, Type: in.Type,
 		Priority: "sin_prioridad", State: "analisis", ProjectID: p.JikuProject, VisibilityLevel: "public"}
-	return e.linkImported(ctx, p, is, req, opts)
+	return e.linkImported(ctx, p, is, req, tmp.Assets, opts)
 }
 
-func (e *Engine) linkImported(ctx context.Context, p *mapping.Project, is *github.Issue, req *jiku.Requirement, opts SyncOptions) (*state.Link, error) {
+func (e *Engine) linkImported(ctx context.Context, p *mapping.Project, is *github.Issue, req *jiku.Requirement, assets []state.Asset, opts SyncOptions) (*state.Link, error) {
 	// Jiku's side is taken as "as created" and GitHub's as unknown, so the first sync carries
 	// GitHub's state, priority and type over to the new requirement.
 	l := &state.Link{
 		ReqID: req.ID, JikuProject: p.JikuProject, IssueNodeID: is.NodeID, Repo: is.Repo, Number: is.Number,
 		Last: state.Snapshot{
-			Title: is.Title, BodyHash: text.Hash(is.Body),
+			Title:     is.Title,
 			JikuState: req.State, JikuPriority: req.Priority, JikuType: req.TypeOrEmpty(),
 			GHOpen: true, GHType: req.TypeOrEmpty(),
 		},
+		Assets: assets,
 	}
+	l.Last.Bodies(text.Hash(req.Description), text.Hash(is.Body))
 	if err := e.st.SaveLink(ctx, l); err != nil {
 		return nil, err
 	}
@@ -128,13 +139,18 @@ func (e *Engine) ExportRequirement(ctx context.Context, p *mapping.Project, req 
 		}
 		if is != nil {
 			log.Info("recovering an interrupted export", "issue", is.Number)
-			return e.linkExported(ctx, p, req, is, opts)
+			return e.linkExported(ctx, p, req, is, nil, opts)
 		}
 	} else if !errors.Is(err, state.ErrNotFound) {
 		return nil, err
 	}
 
-	in := github.IssueInput{Title: strp(req.Title), Body: strp(text.IssueBody(req.Description, req.ID))}
+	tmp := &state.Link{ReqID: req.ID, Repo: p.DefaultRepo}
+	body, err := e.toGitHub(ctx, p, tmp, p.DefaultRepo, req.Description, req.Attachments, false)
+	if err != nil {
+		return nil, err
+	}
+	in := github.IssueInput{Title: strp(req.Title), Body: strp(text.IssueBody(body, req.ID))}
 	if name, set := p.IssueTypeForJiku(req.TypeOrEmpty()); set && name != "" {
 		in.Type = &name
 	}
@@ -152,21 +168,23 @@ func (e *Engine) ExportRequirement(ctx context.Context, p *mapping.Project, req 
 		return nil, fmt.Errorf("creating the issue of requirement %d: %w", req.ID, err)
 	}
 	log.Info("issue created from requirement", "issue", is.Number)
-	return e.linkExported(ctx, p, req, is, opts)
+	return e.linkExported(ctx, p, req, is, tmp.Assets, opts)
 }
 
-func (e *Engine) linkExported(ctx context.Context, p *mapping.Project, req *jiku.Requirement, is *github.Issue, opts SyncOptions) (*state.Link, error) {
+func (e *Engine) linkExported(ctx context.Context, p *mapping.Project, req *jiku.Requirement, is *github.Issue, assets []state.Asset, opts SyncOptions) (*state.Link, error) {
 	// GitHub's side is taken as "as created" and Jiku's as unknown, so the first sync carries
 	// Jiku's state, priority and type over to the issue and its Project item.
 	ghType, _ := p.TypeFromGithub(is.IssueType, is.Labels)
 	l := &state.Link{
 		ReqID: req.ID, JikuProject: p.JikuProject, IssueNodeID: is.NodeID, Repo: is.Repo, Number: is.Number,
 		Last: state.Snapshot{
-			Title: req.Title, BodyHash: text.Hash(req.Description),
+			Title:  req.Title,
 			GHOpen: is.Open(), GHStateReason: is.StateReason, GHType: ghType,
 			JikuType: req.TypeOrEmpty(),
 		},
+		Assets: assets,
 	}
+	l.Last.Bodies(text.Hash(req.Description), text.Hash(is.Body))
 	if err := e.st.SaveLink(ctx, l); err != nil {
 		return nil, err
 	}

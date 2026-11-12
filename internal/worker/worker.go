@@ -74,6 +74,8 @@ type Worker struct {
 	q     *Queue
 	log   *slog.Logger
 	items sync.Map // project item id -> hash of its values
+	// verifying holds the projects whose verification is running.
+	verifying sync.Map
 
 	lastPollOK  atomic.Int64 // unix seconds
 	lastEventOK atomic.Int64
@@ -210,7 +212,17 @@ func (w *Worker) processLoop(ctx context.Context) {
 		case InitialSync:
 			err = w.initialSync(ctx, k.Project)
 		case Verify:
-			err = w.verify(ctx, k.Project)
+			// Verification only reads, and reads every pair: it runs apart so the queue keeps
+			// serving changes meanwhile (one at a time per project).
+			if _, running := w.verifying.LoadOrStore(k.Project, true); !running {
+				go func(project int64) {
+					defer w.verifying.Delete(project)
+					if err := w.verify(ctx, project); err != nil && ctx.Err() == nil {
+						w.log.Error("verification failed", "project", project, "error", err)
+					}
+				}(k.Project)
+			}
+			continue
 		}
 		if err != nil {
 			if ctx.Err() != nil {

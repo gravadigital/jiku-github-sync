@@ -26,6 +26,7 @@ properties).
 | R6 | Public Jiku comments → issue comments, from the connector's account, with "**Name** comentó en Jiku:" | Jiku → GitHub |
 | R7 | Issue comments → public Jiku comments, with "**@login** comentó en [GitHub](link):" | GitHub → Jiku |
 | R8 | Comment edits follow their source; a comment deleted on GitHub is marked as deleted in Jiku (Jiku has no delete) | ↔ |
+| R9 | Attachments of descriptions and comments travel as files (see below) | ↔ |
 | R10 | A mapped repo that is public is reported on startup and by `check-config` | — |
 
 States: `resuelto` / `cancelado` close the issue as `completed` / `not_planned`; the open states
@@ -35,6 +36,15 @@ last open state. A column with no mapping changes nothing in Jiku and leaves an 
 a column can be mapped to a state plus an internal comment (e.g. a "Blocked" column → `en_cola`).
 A card left without a column (e.g. after a Project's options were replaced) is put back where
 Jiku's state says.
+
+**Attachments.** A Jiku image (jpg, png, gif, webp) is uploaded to GitHub and embedded where the
+text referenced it. Other Jiku files (pdf, Office documents, txt, csv, svg) are named on GitHub —
+"📎 informe.pdf (adjunto en Jiku)" — since GitHub only takes images and videos from an API client.
+A GitHub attachment (image, video or file) is downloaded and stored in Jiku as a file of the
+requirement or comment, in its place; when Jiku refuses it (type, size, more than 10 per text) or
+GitHub does not let it be downloaded, a note with its name and a link to GitHub stands in its place.
+Each pair remembers which files are the same on both sides, so a text edited back and forth does
+not copy them again.
 
 Only issues and requirements **created after the connector started watching a project** are
 synced automatically; what already existed is brought in once by the **initial sync**, which the
@@ -214,7 +224,9 @@ docker compose -f docker-compose.local.yml exec jiku-github-sync jiku-github-syn
   reconciliation picks up those changes.
 - **Webhooks** need a GitHub App installed by an owner of the organization. Without it, changes
   arrive by polling (`SYNC_POLL_INTERVAL`).
-- **Attachments** are not copied: GitHub has no API to upload them.
+- **Attachments to GitHub** use the upload endpoint of the GitHub CLI (`gh … --attach`, 2.99+),
+  which GitHub does not document as a public API and which only takes images and videos (10 MB
+  for images): other files are only named. Copying needs push access to the repository.
 - **Replacing a Project's options through the API** (`updateProjectV2Field`) gives every option a
   new id and empties every card; the connector puts linked cards back from Jiku, but cards of
   unlinked issues stay empty.

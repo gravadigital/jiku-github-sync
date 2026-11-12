@@ -282,7 +282,8 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		log.Info("requirement is public again: pair revived")
 		l.Unlinked = false
 		// Jiku wins every field on revival: GitHub's side is taken as "unchanged".
-		l.Last = state.Snapshot{Title: is.Title, BodyHash: text.Hash(is.Body), GHOpen: is.Open(), GHStateReason: is.StateReason}
+		l.Last = state.Snapshot{Title: is.Title, GHOpen: is.Open(), GHStateReason: is.StateReason}
+		l.Last.Bodies("", text.Hash(is.Body))
 	}
 
 	item, err := e.ensureItem(ctx, p, l, is, log)
@@ -305,17 +306,32 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	case sideGitHub:
 		jikuUpd["title"] = is.Title
 	}
-	// Description.
+	// Description. Each side holds its own form of the attachments, so each side is compared with
+	// its own snapshot; when neither moved they are taken as equal.
 	jh, gh := text.Hash(req.Description), text.Hash(is.Body)
-	switch decide(jh != last.BodyHash, gh != last.BodyHash, jh != gh, req.UpdatedAt, is.UpdatedAt) {
+	jBodyChanged, gBodyChanged := jh != last.JikuBody(), gh != last.GHBody()
+	next.Bodies(jh, gh)
+	switch decide(jBodyChanged, gBodyChanged, jBodyChanged || gBodyChanged, req.UpdatedAt, is.UpdatedAt) {
 	case sideJiku:
-		issueUpd.Body, issueChanged = strp(text.IssueBody(req.Description, req.ID)), true
-		next.BodyHash = jh
+		body, err := e.toGitHub(ctx, p, l, is.Repo, req.Description, req.Attachments, false)
+		if err != nil {
+			return err
+		}
+		full := text.IssueBody(body, req.ID)
+		issueUpd.Body, issueChanged = &full, true
+		next.Bodies(jh, text.Hash(full))
 	case sideGitHub:
-		jikuUpd["description"] = text.Normalize(is.Body)
-		next.BodyHash = gh
-	default:
-		next.BodyHash = jh
+		desc, files, err := e.toJiku(ctx, p, l, is.Body, func() (string, error) { return e.gh(p).IssueHTML(ctx, is.Repo, is.Number) }, req.Attachments)
+		if err != nil {
+			return err
+		}
+		desc = text.Normalize(desc)
+		jikuUpd["description"] = desc
+		if len(files) > 0 {
+			// The full set: what the requirement had, plus the new files.
+			jikuUpd["fileIds"] = append(jiku.FileIDs(req.Attachments), files...)
+		}
+		next.Bodies(text.Hash(desc), gh)
 	}
 
 	// Type: the issue type is written apart, because orgs without issue types refuse it.
@@ -468,7 +484,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		log.Info("project fields updated from jiku", "status", finalStatus, "priority", finalPriorityOpt)
 	}
 	for _, n := range notices {
-		if _, err := e.jk.CreateComment(ctx, req.ID, n, "internal"); err != nil {
+		if _, err := e.jk.CreateComment(ctx, req.ID, n, "internal", nil); err != nil {
 			log.Warn("could not leave an internal comment", "error", err)
 		}
 	}

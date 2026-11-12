@@ -47,3 +47,14 @@ func TestNoticeIsMarked(t *testing.T) {
 		t.Fatal("expand")
 	}
 }
+
+func TestComparableIgnoresAttachments(t *testing.T) {
+	jiku := "Ver ![file:12]\n\ny [file:13] y ![attach:4] [x](/api/files/9/preview)"
+	gh := "Ver ![captura.png](https://github.com/user-attachments/assets/ab-12)\n\ny 📎 informe.pdf (adjunto en Jiku) y <img alt=\"a\" src=\"https://github.com/user-attachments/assets/cd-34\" />\nhttps://github.com/user-attachments/assets/ef-56\n"
+	if Comparable(jiku) != "Ver y y" || Comparable(gh) != Comparable(jiku) {
+		t.Fatalf("%q / %q", Comparable(jiku), Comparable(gh))
+	}
+	if Comparable("Ver A") == Comparable("Ver B") {
+		t.Fatal("text differences still count")
+	}
+}

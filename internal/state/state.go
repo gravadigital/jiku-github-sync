@@ -104,8 +104,13 @@ func (m *Mem) Keys() []string {
 // Snapshot is what both sides looked like right after the last sync of a pair. A field that
 // differs from it on one side changed on that side; on both, the most recent change wins.
 type Snapshot struct {
-	Title    string `json:"title"`
-	BodyHash string `json:"bodyHash"`
+	Title string `json:"title"`
+	// BodyHash is the description's hash from before attachments were translated, when both
+	// sides held the same text. JikuBodyHash and GHBodyHash replace it: with attachments each
+	// side holds its own form of the text (`![file:N]` in Jiku, an asset URL on GitHub).
+	BodyHash     string `json:"bodyHash,omitempty"`
+	JikuBodyHash string `json:"jBody,omitempty"`
+	GHBodyHash   string `json:"gBody,omitempty"`
 
 	JikuState    string `json:"jikuState"`
 	JikuPriority string `json:"jikuPriority"`
@@ -119,6 +124,34 @@ type Snapshot struct {
 
 	// LastOpenState is the last open Jiku state seen, to go back to when an issue is reopened.
 	LastOpenState string `json:"lastOpenState,omitempty"`
+}
+
+// JikuBody is the hash of Jiku's description at the last sync.
+func (s Snapshot) JikuBody() string {
+	if s.JikuBodyHash != "" {
+		return s.JikuBodyHash
+	}
+	return s.BodyHash
+}
+
+// GHBody is the hash of the issue's body at the last sync.
+func (s Snapshot) GHBody() string {
+	if s.GHBodyHash != "" {
+		return s.GHBodyHash
+	}
+	return s.BodyHash
+}
+
+// Bodies sets both description hashes.
+func (s *Snapshot) Bodies(jiku, gh string) {
+	s.BodyHash, s.JikuBodyHash, s.GHBodyHash = "", jiku, gh
+}
+
+// Asset is a file that exists on both sides: a Jiku file and the GitHub attachment it became (or
+// came from). It lets a text that goes back and forth reuse the file instead of copying it again.
+type Asset struct {
+	JikuFile int64  `json:"f"`
+	URL      string `json:"u"`
 }
 
 // CommentLink pairs a Jiku comment with its GitHub comment.
@@ -148,7 +181,38 @@ type Link struct {
 	Unlinked bool          `json:"unlinked,omitempty"`
 	Last     Snapshot      `json:"last"`
 	Comments []CommentLink `json:"comments,omitempty"`
+	Assets   []Asset       `json:"assets,omitempty"`
 	SyncedAt time.Time     `json:"syncedAt"`
+}
+
+// AssetURL returns the GitHub URL a Jiku file became, if it did.
+func (l *Link) AssetURL(file int64) (string, bool) {
+	for _, a := range l.Assets {
+		if a.JikuFile == file {
+			return a.URL, true
+		}
+	}
+	return "", false
+}
+
+// AssetFile returns the Jiku file a GitHub attachment URL corresponds to, if any.
+func (l *Link) AssetFile(url string) (int64, bool) {
+	for _, a := range l.Assets {
+		if a.URL == url {
+			return a.JikuFile, true
+		}
+	}
+	return 0, false
+}
+
+// AddAsset records a file present on both sides.
+func (l *Link) AddAsset(file int64, url string) {
+	for _, a := range l.Assets {
+		if a.JikuFile == file && a.URL == url {
+			return
+		}
+	}
+	l.Assets = append(l.Assets, Asset{JikuFile: file, URL: url})
 }
 
 // IssueKey is "owner/repo#number", for logs.

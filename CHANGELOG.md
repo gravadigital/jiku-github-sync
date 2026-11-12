@@ -46,3 +46,13 @@ lint and the tests, and only then publishes `gravadigital/jiku-github-sync` to D
   client with its own rate limits; reloads with unusable credentials are rejected.
 - The service runs the initial sync (`initialSync: plan | apply | off`), the mapping check and a
   periodic verification itself; fresh changes are synced before background work.
+- Attachments of descriptions and comments both ways: Jiku images become embedded GitHub
+  attachments, other Jiku files are named; GitHub attachments become Jiku files (or a note with a
+  link when Jiku refuses them). Each pair remembers the files present on both sides.
+
+### Changed
+
+- The periodic verification runs apart from the sync queue, so it no longer delays fresh changes
+  for as long as it takes to read every pair.
+- The state keeps one description hash per side (`jBody`, `gBody`); links written before keep
+  working through the old `bodyHash`.

@@ -144,6 +144,21 @@ wait_for "edición espejada" sh -c "JIKU_KEY_FILE=$E2E_JIKU_KEY_FILE $JIKU_BIN q
 ghx api -X DELETE "repos/$E2E_REPO/issues/comments/$C" >/dev/null
 wait_for "borrado marcado en Jiku" sh -c "JIKU_KEY_FILE=$E2E_JIKU_KEY_FILE $JIKU_BIN query comments.list --filter entityType=requirement --filter entityId=$R2 --all -o json | jq -r '.[]|select(.body|contains(\"comentario eliminado en GitHub\"))|.id'"
 
+step "Adjuntos · imagen de Jiku → GitHub (embebida); imagen de GitHub → Jiku (archivo)"
+PNG=$(mktemp --suffix=.png); trap 'rm -f "$LAST" "$PNG"' EXIT
+# A 1x1 PNG.
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82' > "$PNG"
+ticket=$(jk cmd files.request-upload "$(jq -nc --argjson s "$(stat -c%s "$PNG")" '{fileName:"adjunto-e2e.png",mimeType:"image/png",fileSize:$s}')" -o json)
+F=$(jq -r .id <<<"$ticket")
+curl -sf -X PUT -H 'Content-Type: image/png' --data-binary @"$PNG" "$(jq -r .uploadUrl <<<"$ticket")" >/dev/null
+jk cmd "requirements.$R.comment" "$(jq -nc --arg c "adjunto e2e jiku ![file:$F]" --argjson f "$F" '{comment:$c,visibilityLevel:"public",fileIds:[$f]}')" -o json >/dev/null
+wait_for "imagen de Jiku embebida en GitHub" sh -c "GH_TOKEN=$E2E_GH_TOKEN gh api repos/$E2E_REPO/issues/$N/comments | jq -r '.[]|select((.body|contains(\"adjunto e2e jiku ![adjunto-e2e.png](https://github.com/user-attachments/assets/\")))|.id'"
+RID=$(ghx api "repos/$E2E_REPO" --jq .id)
+U=$(curl -sf -X POST "https://uploads.github.com/user-attachments/assets?name=captura-e2e.png&content_type=image/png&repository_id=$RID" \
+  -H "Authorization: Bearer $E2E_GH_TOKEN" -H 'Accept: application/json' --data-binary @"$PNG" | jq -r .url)
+ghx api -X POST "repos/$E2E_REPO/issues/$N2/comments" -f body="adjunto e2e github ![captura]($U)" >/dev/null
+wait_for "imagen de GitHub copiada como archivo de Jiku" sh -c "JIKU_KEY_FILE=$E2E_JIKU_KEY_FILE $JIKU_BIN query comments.list --filter entityType=requirement --filter entityId=$R2 --all -o json | jq -r '.[]|select((.body|contains(\"adjunto e2e github ![file:\")) and (.attachments|length)==1 and .attachments[0].fileName==\"captura.png\")|.id'"
+
 if [[ -n "${E2E_WEBHOOK_URL:-}" && -n "${E2E_WEBHOOK_SECRET:-}" ]]; then
   step "Webhook firmado → sync inmediato"
   ghx api -X PATCH "repos/$E2E_REPO/issues/$N2" -f title="$T (webhook)" >/dev/null

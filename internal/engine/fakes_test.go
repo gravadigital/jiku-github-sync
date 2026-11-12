@@ -50,11 +50,20 @@ type fakeGH struct {
 	// timelineLag hides the last N status changes from LastStatusChange, like GitHub's
 	// asynchronous timeline.
 	timelineLag int
+	// assets are the uploaded attachments (url -> file); html is what IssueHTML/CommentHTML
+	// answer (a signed link per asset, like GitHub in a private repo).
+	assets map[string]fakeFile
+}
+
+type fakeFile struct {
+	name, mime string
+	data       []byte
 }
 
 func newFakeGH(clk *clock) *fakeGH {
 	return &fakeGH{clk: clk, issues: map[string]*github.Issue{}, comms: map[string][]*github.Comment{},
-		items: map[string]*github.Item{}, nextNum: map[string]int{}, nextID: 1000, statusLog: map[string][]github.StatusChange{}}
+		items: map[string]*github.Item{}, nextNum: map[string]int{}, nextID: 1000, statusLog: map[string][]github.StatusChange{},
+		assets: map[string]fakeFile{}}
 }
 
 func (f *fakeGH) write(s string, a ...any) { f.writes = append(f.writes, fmt.Sprintf(s, a...)) }
@@ -376,6 +385,7 @@ func schemaOf(fields map[string][]string) *github.ProjectSchema {
 // ---- Jiku ----
 
 type fakeJiku struct {
+	files  map[int64]fakeFile
 	mu     sync.Mutex
 	clk    *clock
 	self   string
@@ -386,7 +396,7 @@ type fakeJiku struct {
 }
 
 func newFakeJiku(clk *clock) *fakeJiku {
-	return &fakeJiku{clk: clk, self: "connector-sub", reqs: map[int64]*jiku.Requirement{}, comms: map[int64][]*jiku.Comment{}, nextID: 100}
+	return &fakeJiku{clk: clk, self: "connector-sub", reqs: map[int64]*jiku.Requirement{}, comms: map[int64][]*jiku.Comment{}, nextID: 100, files: map[int64]fakeFile{}}
 }
 
 func (f *fakeJiku) takeWrites() []string {
@@ -484,6 +494,7 @@ func (f *fakeJiku) CreateRequirement(_ context.Context, in jiku.NewRequirement) 
 	if in.Priority != "" {
 		r.Priority = in.Priority
 	}
+	r.Attachments = f.attachments(in.FileIDs)
 	f.reqs[r.ID] = r
 	f.writes = append(f.writes, fmt.Sprintf("create requirement %d", r.ID))
 	return r.ID, nil
@@ -509,6 +520,8 @@ func (f *fakeJiku) EditRequirement(_ context.Context, id int64, fields map[strin
 		case "type":
 			t := v.(string)
 			r.Type = &t
+		case "fileIds":
+			r.Attachments = f.attachments(v.([]int64))
 		}
 		f.writes = append(f.writes, fmt.Sprintf("req.%s=%v", k, v))
 	}
@@ -527,17 +540,18 @@ func (f *fakeJiku) ListComments(_ context.Context, req int64) ([]*jiku.Comment, 
 	return out, nil
 }
 
-func (f *fakeJiku) CreateComment(_ context.Context, req int64, body, vis string) (int64, error) {
+func (f *fakeJiku) CreateComment(_ context.Context, req int64, body, vis string, fileIDs []int64) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
 	now := f.clk.tick()
-	f.comms[req] = append(f.comms[req], &jiku.Comment{ID: f.nextID, Body: body, AuthorID: f.self, VisibilityLevel: vis, CreatedAt: now, UpdatedAt: now})
+	f.comms[req] = append(f.comms[req], &jiku.Comment{ID: f.nextID, Body: body, AuthorID: f.self, VisibilityLevel: vis, CreatedAt: now, UpdatedAt: now,
+		Attachments: f.attachments(fileIDs)})
 	f.writes = append(f.writes, fmt.Sprintf("%s comment %q", vis, firstLine(body)))
 	return f.nextID, nil
 }
 
-func (f *fakeJiku) EditComment(_ context.Context, req, cid int64, body string) error {
+func (f *fakeJiku) EditComment(_ context.Context, req, cid int64, body string, fileIDs []int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.comms[req] {
@@ -546,6 +560,9 @@ func (f *fakeJiku) EditComment(_ context.Context, req, cid int64, body string) e
 				return fmt.Errorf("activity_not_editable")
 			}
 			c.Body = body
+			if fileIDs != nil {
+				c.Attachments = f.attachments(fileIDs)
+			}
 			f.writes = append(f.writes, fmt.Sprintf("edit comment %d", cid))
 			return nil
 		}
@@ -586,4 +603,115 @@ func (f *fakeGH) LastStatusChange(_ context.Context, node, _ string) (*github.St
 	}
 	c := l[len(l)-1]
 	return &c, nil
+}
+
+// Attachments.
+
+func (f *fakeGH) UploadAsset(_ context.Context, _, name, ct string, data []byte) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !github.AttachableTypes[ct] {
+		return "", &github.APIError{Status: 422, Message: "content_type is not included in the list of allowed content types"}
+	}
+	f.nextID++
+	u := fmt.Sprintf("https://github.com/user-attachments/assets/0000-%d", f.nextID)
+	f.assets[u] = fakeFile{name: name, mime: ct, data: data}
+	f.write("upload %s", name)
+	return u, nil
+}
+
+// Download serves the signed link (…?jwt=) of an uploaded asset, and refuses the plain one, like
+// GitHub in a private repo.
+func (f *fakeGH) Download(_ context.Context, u string) ([]byte, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	plain, signed := strings.CutSuffix(u, "?jwt=ok")
+	a, ok := f.assets[plain]
+	if !ok || !signed {
+		return nil, "", &github.APIError{Status: 404, Message: "not found"}
+	}
+	return a.data, a.mime, nil
+}
+
+func (f *fakeGH) signed(body string) string {
+	var b strings.Builder
+	for u := range f.assets {
+		if strings.Contains(body, u) {
+			fmt.Fprintf(&b, `<img src="%s?jwt=ok">`, u)
+		}
+	}
+	return b.String()
+}
+
+func (f *fakeGH) IssueHTML(_ context.Context, repo string, n int) (string, error) {
+	is := f.byNum(repo, n)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.signed(is.Body), nil
+}
+
+func (f *fakeGH) CommentHTML(_ context.Context, _ string, id int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, cs := range f.comms {
+		for _, c := range cs {
+			if c.ID == id {
+				return f.signed(c.Body), nil
+			}
+		}
+	}
+	return "", &github.APIError{Status: 404}
+}
+
+// personAttach stands for a person dropping a file on GitHub: the asset exists, the text links it.
+func (f *fakeGH) personAttach(name, mime string, data []byte) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	u := fmt.Sprintf("https://github.com/user-attachments/assets/1111-%d", f.nextID)
+	f.assets[u] = fakeFile{name: name, mime: mime, data: data}
+	return u
+}
+
+var jikuAllowed = map[string]bool{"image/png": true, "image/jpeg": true, "application/pdf": true}
+
+func (f *fakeJiku) UploadFile(_ context.Context, name, mime string, data []byte) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !jikuAllowed[mime] {
+		return 0, fmt.Errorf("%w: file_type_not_allowed", jiku.ErrFileRejected)
+	}
+	f.nextID++
+	f.files[f.nextID] = fakeFile{name: name, mime: mime, data: data}
+	f.writes = append(f.writes, "upload "+name)
+	return f.nextID, nil
+}
+
+func (f *fakeJiku) DownloadFile(_ context.Context, id int64) (*jiku.File, []byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.files[id]
+	if !ok {
+		return nil, nil, jiku.ErrNotFound
+	}
+	return &jiku.File{Name: a.name, MimeType: a.mime, Size: int64(len(a.data))}, a.data, nil
+}
+
+// personFile stands for a person uploading a file in Jiku.
+func (f *fakeJiku) personFile(name, mime string, data []byte) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	f.files[f.nextID] = fakeFile{name: name, mime: mime, data: data}
+	return f.nextID
+}
+
+// attachments is called with f.mu held.
+func (f *fakeJiku) attachments(ids []int64) []jiku.Attachment {
+	var out []jiku.Attachment
+	for _, id := range ids {
+		a := f.files[id]
+		out = append(out, jiku.Attachment{ID: id + 5000, FileID: id, FileName: a.name, MimeType: a.mime, FileSize: int64(len(a.data))})
+	}
+	return out
 }

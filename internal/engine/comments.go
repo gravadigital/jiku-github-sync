@@ -103,11 +103,21 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 			if opts.WithDates {
 				date = &j.CreatedAt
 			}
-			body := text.GitHubComment(j.AuthorName(), j.Body, j.ID, date)
+			render := func() (string, error) {
+				content, err := e.toGitHub(ctx, p, l, is.Repo, j.Body, j.Attachments, true)
+				if err != nil {
+					return "", err
+				}
+				return text.GitHubComment(j.AuthorName(), content, j.ID, date), nil
+			}
 			if i, ok := byJ[j.ID]; ok {
 				cl := &l.Comments[i]
 				if cl.Origin == "jiku" && text.Hash(j.Body) != cl.SourceHash {
 					if _, alive := gByID[cl.GHID]; alive {
+						body, err := render()
+						if err != nil {
+							return err
+						}
 						if err := e.gh(p).UpdateComment(ctx, is.Repo, cl.GHID, body); err != nil {
 							return err
 						}
@@ -116,6 +126,10 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 					cl.SourceHash = text.Hash(j.Body)
 				}
 				continue
+			}
+			body, err := render()
+			if err != nil {
+				return err
 			}
 			gc, err := e.gh(p).CreateComment(ctx, is.Repo, is.Number, body)
 			if err != nil {
@@ -135,11 +149,23 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 			if opts.WithDates {
 				date = &g.CreatedAt
 			}
-			body := text.JikuComment(g.Author, g.HTMLURL, g.Body, date)
+			html := func() (string, error) { return e.gh(p).CommentHTML(ctx, is.Repo, g.ID) }
 			if i, ok := byG[g.ID]; ok {
 				cl := &l.Comments[i]
 				if cl.Origin == "github" && text.Hash(g.Body) != cl.SourceHash {
-					if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, body); err != nil {
+					var linked []jiku.Attachment
+					if jc := jByID[cl.JikuID]; jc != nil {
+						linked = jc.Attachments
+					}
+					content, files, err := e.toJiku(ctx, p, l, g.Body, html, linked)
+					if err != nil {
+						return err
+					}
+					var fileIDs []int64
+					if len(files) > 0 {
+						fileIDs = append(jiku.FileIDs(linked), files...)
+					}
+					if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, text.JikuComment(g.Author, g.HTMLURL, content, date), fileIDs); err != nil {
 						return err
 					}
 					cl.SourceHash = text.Hash(g.Body)
@@ -147,7 +173,11 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 				}
 				continue
 			}
-			jid, err := e.jk.CreateComment(ctx, req.ID, body, "public")
+			content, files, err := e.toJiku(ctx, p, l, g.Body, html, nil)
+			if err != nil {
+				return err
+			}
+			jid, err := e.jk.CreateComment(ctx, req.ID, text.JikuComment(g.Author, g.HTMLURL, content, date), "public", files)
 			if err != nil {
 				return err
 			}
@@ -172,7 +202,7 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 		if jc := jByID[cl.JikuID]; jc != nil {
 			login, url = attribution(jc.Body, is.HTMLURL)
 		}
-		if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, text.DeletedComment(login, url)); err != nil {
+		if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, text.DeletedComment(login, url), nil); err != nil {
 			return err
 		}
 		cl.Deleted = true

@@ -98,7 +98,7 @@ func pair(ctx context.Context, gh engine.GitHub, jk jiku.API, p *mapping.Project
 	if req.Title != is.Title {
 		d = append(d, fmt.Sprintf("título: Jiku %q / GitHub %q", req.Title, is.Title))
 	}
-	if text.Normalize(req.Description) != text.Normalize(is.Body) {
+	if text.Comparable(req.Description) != text.Comparable(is.Body) {
 		d = append(d, "descripción distinta")
 	}
 	switch req.State {

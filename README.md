@@ -227,6 +227,11 @@ docker compose -f docker-compose.local.yml exec jiku-github-sync jiku-github-syn
   reconciliation picks up those changes.
 - **Webhooks** need a GitHub App installed by an owner of the organization. Without it, changes
   arrive by polling (`SYNC_POLL_INTERVAL`).
+- **GitHub App credentials** are covered by unit tests (JWT, installation tokens, one client per
+  organization) but have not yet run against a real installation; token credentials have.
+- **Reopened closed issues are not imported.** An issue that was already closed when the initial
+  sync ran is not brought to Jiku if it is reopened later. A requirement in the same situation is
+  exported when it is reopened (by the reconciliation).
 - **Attachments to GitHub** use the upload endpoint of the GitHub CLI (`gh … --attach`, 2.99+),
   which GitHub does not document as a public API and which only takes images and videos (10 MB
   for images): other files are only named. Copying needs push access to the repository.

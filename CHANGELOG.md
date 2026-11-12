@@ -29,34 +29,52 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-12
+
+First release: a service that keeps the requirements of Jiku projects and the issues of GitHub
+repositories (and their Project v2) in sync, from outside Jiku.
+
 ### Added
 
-- Repository skeleton: Go module, distroless Docker image, CI (`ci.yml`, `dev-images.yml`,
+- **Sync both ways between Jiku requirements and GitHub issues.** Every public requirement of a
+  mapped project gets its issue; every new issue of a mapped repository becomes a public requirement
+  and is added to the project's GitHub Project. Title, description, state (open/closed and the
+  Project's Status column), priority and type are synced, and the latest change wins, field by
+  field. Internal requirements never leave Jiku; a requirement that becomes internal stops syncing
+  (a note is left on the issue) and is revived if it becomes public again.
+- **States.** `resuelto` / `cancelado` close the issue as completed / not planned; the open states
+  map to Status columns. Closing the issue of an `incidencia` resolves it with
+  `resolutionType: otro`; reopening goes back to the last open state. A column can map to a state
+  plus an internal comment (e.g. a blocked column → `en_cola`); an unmapped column changes nothing
+  and leaves an internal comment. Cards left without a column are put back from Jiku.
+- **Comments.** Public Jiku comments go to GitHub from the connector's account with an attribution
+  line; GitHub comments become public Jiku comments with a link to the original. Edits follow their
+  source; a comment deleted on GitHub is marked as deleted in Jiku.
+- **Attachments of descriptions and comments.** Jiku images become embedded GitHub attachments;
+  other Jiku files are named on GitHub. GitHub attachments become Jiku files of the requirement or
+  comment, or a note with a link when Jiku refuses them. Each pair remembers the files present on
+  both sides, so texts edited back and forth do not copy them again.
+- **Mapping file** (`SYNC_CONFIG`): projects, repositories, the GitHub Project, and reusable field
+  presets resolved by name at runtime (states, priorities, types), so a Project's options can change
+  without a code change. Hot reload; a reload that does not validate is rejected and the previous
+  mapping keeps working.
+- **GitHub credentials per client**: a named token (from an environment variable or a file) or the
+  connector's GitHub App with one installation per organization. Each credential is its own client
+  with its own rate limits; the identity of each one is logged on startup.
+- **Initial sync** of what already exists (`initialSync: plan | apply | off`), run by the service
+  itself: open requirements and issues with their comments; existing items are linked only when
+  their titles are exactly the same, anything else is created on the other side. `plan` logs the
+  plan without writing.
+- **Service operation**: GitHub polling (issues, comments, Project item values), Jiku's
+  requirement events, a periodic reconciliation that catches whatever a missed event or poll left
+  behind (including requirements that became public or were reopened while the connector was down),
+  a periodic read-only verification of every pair, an HMAC-verified webhook receiver, `/healthz` and
+  `/readyz`. Fresh changes are synced before background work.
+- **Recovery**: creations interrupted between the write and storing the pair are found again by
+  their markers, never duplicated; the connector's own writes never echo back.
+- **State** in the connector's own space of Jiku's KV: no change in Jiku, no tags.
+- Startup and `check-config` report a mapped repository that is public.
+- Diagnostic commands: `check-config`, `sync-inicial [--dry-run]`, `verify`, `healthcheck`,
+  `version`.
+- Distroless Docker image (`gravadigital/jiku-github-sync`), CI (`ci.yml`, `dev-images.yml`,
   `release.yml`) and `docker-compose.local.yml` to run next to Jiku's local stack.
-- State-based sync engine between Jiku requirements and GitHub issues + a Project v2: creation both
-  ways (public requirements and new issues), title, description, state (open/closed and the
-  Project's Status), priority, type, comments with edits and deletions, visibility changes, issue
-  transfers and recovery of interrupted creations.
-- Mapping file with reusable presets resolved by name at runtime and hot reload; `check-config`.
-- Worker: GitHub polling (issues, comments, Project item values), Jiku's requirement events,
-  periodic reconciliation, HMAC-verified webhook receiver, `/healthz` and `/readyz`.
-- `sync-inicial`: one-time sync of what already exists, with a reviewable plan and `--dry-run`.
-- State in the connector's space of Jiku's KV (no Jiku change, no tags).
-- GitHub credentials per client in the mapping (token from an environment variable or a file, or
-  the connector's GitHub App with one installation per organization); each credential is its own
-  client with its own rate limits; reloads with unusable credentials are rejected.
-- The service runs the initial sync (`initialSync: plan | apply | off`), the mapping check and a
-  periodic verification itself; fresh changes are synced before background work.
-- Attachments of descriptions and comments both ways: Jiku images become embedded GitHub
-  attachments, other Jiku files are named; GitHub attachments become Jiku files (or a note with a
-  link when Jiku refuses them). Each pair remembers the files present on both sides.
-
-### Changed
-
-- The periodic verification runs apart from the sync queue, so it no longer delays fresh changes
-  for as long as it takes to read every pair.
-- After the initial sync, the reconciliation exports every open public requirement without a pair,
-  not only those created after the connector started: an older requirement that became public or
-  was reopened while its event was missed (connector down or restarting) was never exported.
-- The state keeps one description hash per side (`jBody`, `gBody`); links written before keep
-  working through the old `bodyHash`.

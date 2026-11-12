@@ -24,7 +24,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 Pushing the tag is what publishes. `release.yml` checks that the CHANGELOG has the tag's section, runs vet,
 lint and the tests, and only then publishes `gravadigital/jiku-github-sync` to Docker Hub with the tags
-`X.Y.Z`, `X.Y` and `latest`. A tag without its section fails before anything is built.
+`X.Y.Z`, `X.Y` and `latest`. A tag without its section fails before anything is built. The step by step
+for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 

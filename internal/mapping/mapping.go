@@ -49,8 +49,6 @@ type Project struct {
 	// mapped: "plan" (default: compute the plan and log it, write nothing), "apply" (run it once;
 	// it is recorded in the state and never repeated) or "off".
 	InitialSync string `yaml:"initialSync"`
-	// Links pin existing requirements to existing issues for the initial sync.
-	Links []ManualLink `yaml:"links"`
 
 	// Fields is the resolved preset (nil when none). Filled by Load.
 	Fields *FieldMapping `yaml:"-"`
@@ -62,12 +60,6 @@ const (
 	InitialSyncApply = "apply"
 	InitialSyncOff   = "off"
 )
-
-// ManualLink pins a requirement to an issue ("owner/repo#123") in the initial sync.
-type ManualLink struct {
-	Requirement int64  `yaml:"requirement"`
-	Issue       string `yaml:"issue"`
-}
 
 // InitialSyncMode returns the project's mode, "plan" when unset.
 func (p *Project) InitialSyncMode() string {
@@ -205,11 +197,6 @@ func (f *File) validate() error {
 		case "", InitialSyncPlan, InitialSyncApply, InitialSyncOff:
 		default:
 			errs = append(errs, fmt.Errorf("%s.initialSync: %q is not plan, apply or off", at, p.InitialSync))
-		}
-		for j, l := range p.Links {
-			if l.Requirement <= 0 || !strings.Contains(l.Issue, "#") {
-				errs = append(errs, fmt.Errorf("%s.links[%d]: needs requirement and issue (owner/repo#123)", at, j))
-			}
 		}
 		if p.FieldMapping != "" {
 			fm, ok := f.FieldMappings[p.FieldMapping]

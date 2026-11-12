@@ -29,7 +29,7 @@ func (w *Worker) initialSync(ctx context.Context, projectID int64) error {
 		return nil
 	}
 	pl, err := initial.Build(ctx, initial.Deps{GitHub: w.o.GitHub, Jiku: w.o.Jiku, Store: w.o.Store,
-		WriteInterval: w.o.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p, p.Links)
+		WriteInterval: w.o.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p)
 	if err != nil {
 		return fmt.Errorf("initial sync plan: %w", err)
 	}

@@ -3,7 +3,7 @@
 //
 //	jiku-github-sync [serve]                        run the worker (default)
 //	jiku-github-sync check-config [<project>]       compare the mapping with GitHub
-//	jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
+//	jiku-github-sync sync-inicial <project> [--dry-run]
 //	jiku-github-sync verify <project>               compare both sides, read-only
 //	jiku-github-sync healthcheck                    query /readyz (Docker HEALTHCHECK)
 //	jiku-github-sync version
@@ -49,7 +49,7 @@ const usage = `jiku-github-sync — Jiku ↔ GitHub (Issues + Projects) connecto
   jiku-github-sync [serve]                    runs the worker (default)
   jiku-github-sync check-config [<project>]   compares the mapping with GitHub: repos, Project
                                               fields and options, issue types (exit 1 on errors)
-  jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
+  jiku-github-sync sync-inicial <project> [--dry-run]
                                               one-time sync of everything open that already
                                               exists, both ways, with its comments
   jiku-github-sync verify <project>           read-only: compares both sides of every pair and
@@ -269,7 +269,6 @@ func checkConfig(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("sync-inicial", flag.ContinueOnError)
 	dry := fs.Bool("dry-run", false, "print the plan and write nothing")
-	links := fs.String("links", "", "YAML file with manual links: [{requirement: 12, issue: owner/repo#3}]")
 	// Accept the project id before or after the flags.
 	var pos []string
 	for len(args) > 0 {
@@ -283,7 +282,7 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 		}
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]")
+		return errors.New("usage: jiku-github-sync sync-inicial <project> [--dry-run]")
 	}
 	projectID, err := strconv.ParseInt(pos[0], 10, 64)
 	if err != nil {
@@ -296,12 +295,6 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	p := m.Project(projectID)
 	if p == nil {
 		return fmt.Errorf("project %d is not in %s", projectID, cfg.MappingFile)
-	}
-	manual := p.Links
-	if *links != "" {
-		if manual, err = initial.LoadLinks(*links); err != nil {
-			return err
-		}
 	}
 	gh, err := newGitHub(cfg, log)
 	if err != nil {
@@ -317,7 +310,7 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 		return err
 	}
 	jk := jiku.New(c)
-	pl, err := initial.Build(ctx, initial.Deps{GitHub: gh, Jiku: jk, Store: st, WriteInterval: cfg.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p, manual)
+	pl, err := initial.Build(ctx, initial.Deps{GitHub: gh, Jiku: jk, Store: st, WriteInterval: cfg.WriteInterval, ItemSettle: engine.DefaultItemSettle}, p)
 	if err != nil {
 		return err
 	}

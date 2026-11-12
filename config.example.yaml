@@ -69,7 +69,6 @@ projects:
     #   apply           the service runs it once (recorded in its state, never repeated)
     #   off             nothing
     # Edit this file while the service runs: the change is picked up without a restart.
+    # A requirement and an issue that already exist are linked only when their titles are
+    # exactly the same (and unique on each side); everything else is created on the other side.
     initialSync: plan
-    # Existing requirement <-> existing issue pairs the initial sync must link, not duplicate.
-    links:
-      - { requirement: 456, issue: acme-org/example-api#12 }

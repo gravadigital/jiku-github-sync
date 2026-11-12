@@ -109,16 +109,18 @@ func TestUnknownKeysRejected(t *testing.T) {
 	}
 }
 
-func TestInitialSyncModeAndLinks(t *testing.T) {
-	f, err := Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: apply\n    links: [{requirement: 3, issue: a/b#4}]\n"))
-	if err != nil || f.Project(1).InitialSyncMode() != InitialSyncApply || len(f.Project(1).Links) != 1 {
-		t.Fatalf("valid apply mode with links: %v", err)
+func TestInitialSyncMode(t *testing.T) {
+	f, err := Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: apply\n"))
+	if err != nil || f.Project(1).InitialSyncMode() != InitialSyncApply {
+		t.Fatalf("valid apply mode: %v", err)
 	}
 	if def, _ := Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n")); def.Project(1).InitialSyncMode() != InitialSyncPlan {
 		t.Fatal("the default mode is plan: nothing is written until someone says apply")
 	}
-	_, err = Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: yes\n    links: [{requirement: 3}]\n"))
-	if err == nil || !strings.Contains(err.Error(), "initialSync") || !strings.Contains(err.Error(), "links[0]") {
-		t.Fatalf("invalid mode and link must fail: %v", err)
+	if _, err = Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    initialSync: yes\n")); err == nil || !strings.Contains(err.Error(), "initialSync") {
+		t.Fatalf("an invalid mode must fail: %v", err)
+	}
+	if _, err = Parse([]byte("projects:\n  - jikuProject: 1\n    repos: [a/b]\n    defaultRepo: a/b\n    links: []\n")); err == nil {
+		t.Fatal("there are no manual links: the key must be rejected")
 	}
 }

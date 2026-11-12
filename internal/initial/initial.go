@@ -10,13 +10,10 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/gravadigital/jiku-github-sync/internal/engine"
 	"github.com/gravadigital/jiku-github-sync/internal/github"
@@ -32,11 +29,15 @@ const (
 	createsPerHour   = 500
 )
 
-// Pair is an existing requirement and an existing issue that are the same thing.
+// Pair is an existing requirement and an existing issue that are the same thing: same title,
+// or an issue the connector created for that requirement. In their first sync, on every field the
+// most recent side wins.
 type Pair struct {
-	Req    *jiku.Requirement
-	Issue  *github.Issue
-	Reason string // marker | manual | title
+	Req   *jiku.Requirement
+	Issue *github.Issue
+	// Reason is "title" (same title on both sides) or "marker" (an issue the connector itself
+	// created earlier, whose link was lost).
+	Reason string
 }
 
 // Plan is what the initial sync would do.
@@ -54,22 +55,6 @@ type Plan struct {
 	GitHubCreates int
 	JikuCreates   int
 	Estimate      time.Duration
-}
-
-// ManualLink pins a requirement to an issue ("owner/repo#123").
-type ManualLink = mapping.ManualLink
-
-// LoadLinks reads a manual links file.
-func LoadLinks(path string) ([]ManualLink, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // operator's file
-	if err != nil {
-		return nil, err
-	}
-	var ls []ManualLink
-	if err := yaml.Unmarshal(b, &ls); err != nil {
-		return nil, fmt.Errorf("links file: %w", err)
-	}
-	return ls, nil
 }
 
 // GitHub is what building the plan needs.
@@ -90,12 +75,12 @@ type Deps struct {
 	ItemSettle time.Duration
 }
 
-func normTitle(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+func normTitle(s string) string { return strings.TrimSpace(s) }
 
 func issueRef(is *github.Issue) string { return fmt.Sprintf("%s#%d", is.Repo, is.Number) }
 
 // Build makes the plan of a project.
-func Build(ctx context.Context, d Deps, p *mapping.Project, manual []ManualLink) (*Plan, error) {
+func Build(ctx context.Context, d Deps, p *mapping.Project) (*Plan, error) {
 	pl := &Plan{Project: p}
 	all, err := d.Jiku.ListRequirements(ctx, p.JikuProject, map[string]any{"visibilityLevel": "public"})
 	if err != nil {
@@ -148,17 +133,8 @@ func Build(ctx context.Context, d Deps, p *mapping.Project, manual []ManualLink)
 			}
 		}
 	}
-	// 2. Manual links.
-	for _, m := range manual {
-		r := reqs[m.Requirement]
-		is := issues[strings.ToLower(strings.TrimSpace(m.Issue))]
-		if r == nil || is == nil {
-			pl.Skipped = append(pl.Skipped, fmt.Sprintf("vínculo manual %d ↔ %s: alguno de los dos no está pendiente (ya vinculado, cerrado, interno o inexistente)", m.Requirement, m.Issue))
-			continue
-		}
-		pair(r, is, "manual")
-	}
-	// 3. Same title, when it is unique on both sides.
+	// 2. Exactly the same title (only surrounding whitespace is ignored), when it is unique on
+	// both sides. A repeated title is ambiguous: those are created separately.
 	byTitleR := map[string][]*jiku.Requirement{}
 	for _, r := range reqs {
 		byTitleR[normTitle(r.Title)] = append(byTitleR[normTitle(r.Title)], r)
@@ -172,7 +148,7 @@ func Build(ctx context.Context, d Deps, p *mapping.Project, manual []ManualLink)
 		if len(rs) == 1 && len(is) == 1 {
 			pair(rs[0], is[0], "title")
 		} else if len(is) > 0 {
-			pl.Skipped = append(pl.Skipped, fmt.Sprintf("título repetido %q (%d requisitos, %d issues): se crean por separado; usá un vínculo manual si son lo mismo", rs[0].Title, len(rs), len(is)))
+			pl.Skipped = append(pl.Skipped, fmt.Sprintf("título repetido %q (%d requisitos, %d issues): se crean por separado", rs[0].Title, len(rs), len(is)))
 		}
 	}
 	for _, r := range reqs {

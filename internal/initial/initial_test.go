@@ -68,23 +68,25 @@ func TestPlan(t *testing.T) {
 		issues: []*github.Issue{
 			issue(1, "Mismo título", ""),
 			issue(2, "Creado por el conector", text.IssueBody("x", 12)),
-			issue(3, "Vinculado a mano", ""),
+			issue(3, "Con espacios", ""),
 			issue(4, "Repetido", ""),
 			issue(5, "Repetido", ""),
 			issue(6, "Solo en GitHub", ""),
+			issue(8, "Mayúsculas distintas", ""),
 			{NodeID: "PR", Repo: "acme/api", Number: 7, Title: "PR", State: "open", IsPR: true},
 		},
 		comms: map[int][]*github.Comment{6: {{ID: 1, Body: "hola"}, {ID: 2, Body: text.Notice("aviso")}}},
 	}
 	jk := &fakeJiku{
 		reqs: []*jiku.Requirement{
-			req(11, "mismo   TÍTULO", "analisis", "public"),
+			req(11, "Mismo título", "analisis", "public"),
 			req(12, "otro nombre", "desarrollo", "public"),
-			req(13, "nombre distinto", "revision", "public"),
+			req(13, "  Con espacios ", "revision", "public"),
 			req(14, "Repetido", "analisis", "public"),
 			req(15, "Solo en Jiku", "planificacion", "public"),
 			req(16, "Interno", "analisis", "internal"),
 			req(17, "Cerrado", "resuelto", "public"),
+			req(18, "mayúsculas distintas", "analisis", "public"),
 		},
 		comms: map[int64][]*jiku.Comment{15: {
 			{ID: 1, AuthorID: "person", VisibilityLevel: "public"},
@@ -93,8 +95,7 @@ func TestPlan(t *testing.T) {
 		}},
 	}
 	p := &mapping.Project{JikuProject: 7, Repos: []string{"acme/api"}, DefaultRepo: "acme/api", GithubProject: "P"}
-	pl, err := Build(context.Background(), Deps{GitHub: gh, Jiku: jk, Store: state.New(state.NewMem()), WriteInterval: time.Second},
-		p, []ManualLink{{Requirement: 13, Issue: "ACME/api#3"}})
+	pl, err := Build(context.Background(), Deps{GitHub: gh, Jiku: jk, Store: state.New(state.NewMem()), WriteInterval: time.Second}, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,21 +103,21 @@ func TestPlan(t *testing.T) {
 	for _, l := range pl.Link {
 		links[l.Req.ID] = l.Reason
 	}
-	if links[11] != "title" || links[12] != "marker" || links[13] != "manual" || len(links) != 3 {
-		t.Fatalf("links: %v", links)
+	if links[11] != "title" || links[12] != "marker" || links[13] != "title" || len(links) != 3 {
+		t.Fatalf("links: %v (exact title, surrounding spaces ignored; the connector's own issue by marker)", links)
 	}
 	var exp []int64
 	for _, r := range pl.Export {
 		exp = append(exp, r.ID)
 	}
-	if len(exp) != 2 || exp[0] != 14 || exp[1] != 15 {
-		t.Fatalf("export: %v (internal and closed are left out; a repeated title is not paired)", exp)
+	if len(exp) != 3 || exp[0] != 14 || exp[1] != 15 || exp[2] != 18 {
+		t.Fatalf("export: %v (a different case is not the same title; a repeated title is not paired; internal and closed are left out)", exp)
 	}
 	var imp []int
 	for _, is := range pl.Import {
 		imp = append(imp, is.Number)
 	}
-	if len(imp) != 3 || imp[0] != 4 || imp[2] != 6 {
+	if len(imp) != 4 || imp[0] != 4 || imp[1] != 5 || imp[2] != 6 || imp[3] != 8 {
 		t.Fatalf("import: %v (pull requests are left out)", imp)
 	}
 	if pl.CommentsToGitHub != 1 || pl.CommentsToJiku != 1 {

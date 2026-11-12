@@ -103,7 +103,9 @@ The connector is meant to run as a long-lived container; nothing needs a command
     without errors it is recorded in the state and never repeated (with errors, it is retried on
     the next start or reload; it is idempotent).
   - Typical flow: map the project, read the plan in the logs, switch to `apply` in the file.
-    Manual links go in the project's `links`.
+    Something that already exists on both sides is linked only when its title is **exactly
+    the same** (surrounding spaces aside) and unique on each side; in that first sync, on
+    every field the most recent side wins. Everything else is created on the other side.
 - **After each reconciliation** it logs a read-only verification of every pair
   (`verification`, differences as WARN). `SYNC_VERIFY=false` turns it off.
 
@@ -119,7 +121,7 @@ The same operations exist as subcommands, for diagnosis (`docker exec … jiku-g
 ```
 jiku-github-sync [serve]                         runs the worker (default)
 jiku-github-sync check-config [<project>]        compares the mapping with GitHub (exit 1 on errors)
-jiku-github-sync sync-inicial <project> [--dry-run] [--links <file>]
+jiku-github-sync sync-inicial <project> [--dry-run]
 jiku-github-sync verify <project>                read-only: compares both sides of every pair
 jiku-github-sync healthcheck                     queries /readyz (Docker HEALTHCHECK)
 jiku-github-sync version
@@ -130,9 +132,8 @@ jiku-github-sync version
   the organization has. Run it when mapping a project and after any change to its board.
 - **`sync-inicial`**: one-time sync of everything **open** that already exists, both ways, with its
   comments (their original date goes in the attribution). It prints a plan first — what is
-  linked (same marker, a manual link, or a title that is unique on both sides), created, skipped,
-  how many writes and how long given GitHub's limits — and `--dry-run` stops there. Manual links:
-  a YAML list `[{requirement: 12, issue: owner/repo#3}]`. Running it again is safe. Every comment
+  linked (exactly the same title, unique on both sides), created, skipped, how many writes and
+  how long given GitHub's limits — and `--dry-run` stops there. Running it again is safe. Every comment
   copied into Jiku notifies the requirement's subscribers by mail: the plan says how many.
 
 - **`verify`**: read-only. For every linked pair it compares title, description, state and

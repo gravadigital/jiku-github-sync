@@ -395,19 +395,27 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 			w.enqueueBackground(Key{Kind: Requirement, ReqID: id})
 			n++
 		}
-		reqs, err := w.o.Jiku.ListRequirements(ctx, p.JikuProject, map[string]any{
-			"visibilityLevel": "public",
-			"createdAt":       map[string]any{"gte": ps.StartedAt.UTC().Format(time.RFC3339)},
-		})
+		// Public requirements without a pair. Before the initial sync, what existed before the
+		// project was mapped is the initial sync's job, so only newer ones count. After it, an
+		// older one without a pair that is open became public (or was reopened) while its event
+		// was missed (the connector down, a restart), and goes like one that just became public;
+		// older closed ones stay out, as the initial sync left them.
+		filter := map[string]any{"visibilityLevel": "public"}
+		if ps.InitialSyncAt.IsZero() {
+			filter["createdAt"] = map[string]any{"gte": ps.StartedAt.UTC().Format(time.RFC3339)}
+		}
+		reqs, err := w.o.Jiku.ListRequirements(ctx, p.JikuProject, filter)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("project %d: %w", p.JikuProject, err))
 			continue
 		}
 		for _, r := range reqs {
-			if !linked[r.ID] {
-				w.enqueueBackground(Key{Kind: Requirement, ReqID: r.ID})
-				n++
+			older := r.CreatedAt.Before(ps.StartedAt)
+			if linked[r.ID] || (older && (r.State == "resuelto" || r.State == "cancelado")) {
+				continue
 			}
+			w.enqueueBackground(Key{Kind: Requirement, ReqID: r.ID, BecamePublic: older})
+			n++
 		}
 	}
 	w.log.Info("reconciliation queued", "items", n)

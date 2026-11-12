@@ -54,5 +54,8 @@ lint and the tests, and only then publishes `gravadigital/jiku-github-sync` to D
 
 - The periodic verification runs apart from the sync queue, so it no longer delays fresh changes
   for as long as it takes to read every pair.
+- After the initial sync, the reconciliation exports every open public requirement without a pair,
+  not only those created after the connector started: an older requirement that became public or
+  was reopened while its event was missed (connector down or restarting) was never exported.
 - The state keeps one description hash per side (`jBody`, `gBody`); links written before keep
   working through the old `bodyHash`.

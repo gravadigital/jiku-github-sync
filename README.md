@@ -49,6 +49,9 @@ not copy them again.
 Only issues and requirements **created after the connector started watching a project** are
 synced automatically; what already existed is brought in once by the **initial sync**, which the
 service itself runs when the project's `initialSync` is `apply` (see below).
+After it, the periodic reconciliation also exports any open public requirement that has no pair,
+however old: one that became public, or was reopened, while the connector was not looking (down,
+restarting) is not lost. Older closed ones stay out, as the initial sync left them.
 
 ## How it works
 

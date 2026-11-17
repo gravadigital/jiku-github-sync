@@ -166,9 +166,15 @@ type CommentLink struct {
 	Deleted bool `json:"d,omitempty"`
 }
 
-// Link is a requirement and its issue.
+// Link is a requirement and its issue, or a task and its sub-issue.
+//
+// A task's pair (TaskID set) is stored under its own keys. Its ReqID is the requirement the task
+// was synced under, and ParentNode that requirement's issue: the sub-issue's parent at the last
+// sync. Links written before tasks existed have no TaskID and are requirements.
 type Link struct {
 	ReqID       int64  `json:"reqId"`
+	TaskID      int64  `json:"taskId,omitempty"`
+	ParentNode  string `json:"parentNode,omitempty"`
 	JikuProject int64  `json:"jikuProject"`
 	IssueNodeID string `json:"issueNodeId"`
 	Repo        string `json:"repo"`
@@ -178,11 +184,17 @@ type Link struct {
 	// Unlinked marks a pair that stopped syncing because the requirement became internal. It is
 	// kept as a tombstone so the issue is not imported again, and is revived if the requirement
 	// becomes public again.
-	Unlinked bool          `json:"unlinked,omitempty"`
-	Last     Snapshot      `json:"last"`
-	Comments []CommentLink `json:"comments,omitempty"`
-	Assets   []Asset       `json:"assets,omitempty"`
-	SyncedAt time.Time     `json:"syncedAt"`
+	Unlinked bool `json:"unlinked,omitempty"`
+	// UnlinkedBy is the side that unlinked a task's pair: "jiku" (the task became internal or left
+	// the synced requirements) or "github" (the sub-issue was detached). Only that side revives it.
+	UnlinkedBy string `json:"unlinkedBy,omitempty"`
+	// SubIssueNoted marks a requirement whose issue was found to be a sub-issue of another synced
+	// issue, once its internal note was left (it stays a requirement).
+	SubIssueNoted bool          `json:"subNoted,omitempty"`
+	Last          Snapshot      `json:"last"`
+	Comments      []CommentLink `json:"comments,omitempty"`
+	Assets        []Asset       `json:"assets,omitempty"`
+	SyncedAt      time.Time     `json:"syncedAt"`
 }
 
 // AssetURL returns the GitHub URL a Jiku file became, if it did.
@@ -215,6 +227,9 @@ func (l *Link) AddAsset(file int64, url string) {
 	l.Assets = append(l.Assets, Asset{JikuFile: file, URL: url})
 }
 
+// IsTask reports whether the pair is a task's.
+func (l *Link) IsTask() bool { return l.TaskID != 0 }
+
 // IssueKey is "owner/repo#number", for logs.
 func (l *Link) IssueKey() string { return fmt.Sprintf("%s#%d", l.Repo, l.Number) }
 
@@ -227,6 +242,13 @@ type ProjectState struct {
 	InitialSyncAt time.Time `json:"initialSyncAt,omitempty"`
 	// Links are the requirement ids with a Link (the index the KV cannot give).
 	Links []int64 `json:"links"`
+	// TaskLinks are the task ids with a Link (only with tasks turned on).
+	TaskLinks []int64 `json:"taskLinks,omitempty"`
+	// TasksStartedAt is when the connector started syncing the project's tasks: tasks and
+	// sub-issues created before it are only synced by the tasks' initial sync.
+	TasksStartedAt time.Time `json:"tasksStartedAt,omitempty"`
+	// TaskInitialSyncAt is when the tasks' initial sync was applied (zero if never).
+	TaskInitialSyncAt time.Time `json:"taskInitialSyncAt,omitempty"`
 	// IssueCursor and CommentCursor are per repo: the newest updated_at already processed.
 	IssueCursor   map[string]time.Time `json:"issueCursor,omitempty"`
 	CommentCursor map[string]time.Time `json:"commentCursor,omitempty"`
@@ -275,6 +297,12 @@ func issueKey(nodeID string) string    { return "link.i." + NodeKey(nodeID) }
 func projectKey(p int64) string        { return fmt.Sprintf("project.%d", p) }
 func pendingIssueKey(n string) string  { return "pending.i." + NodeKey(n) }
 func pendingReqKey(reqID int64) string { return fmt.Sprintf("pending.r.%d", reqID) }
+
+// A task's pair has its own keys: a sub-issue's node never collides with a requirement's.
+func taskLinkKey(taskID int64) string    { return fmt.Sprintf("link.t.%d", taskID) }
+func taskIssueKey(nodeID string) string  { return "link.ti." + NodeKey(nodeID) }
+func pendingTaskKey(taskID int64) string { return fmt.Sprintf("pending.t.%d", taskID) }
+func pendingSubIssueKey(n string) string { return "pending.ti." + NodeKey(n) }
 
 // Link returns the link of a requirement.
 func (s *Store) Link(ctx context.Context, reqID int64) (*Link, error) {
@@ -378,4 +406,94 @@ func (s *Store) SetPendingRequirement(ctx context.Context, reqID int64, p Pendin
 // ClearPendingRequirement removes the record.
 func (s *Store) ClearPendingRequirement(ctx context.Context, reqID int64) error {
 	return s.kv.Delete(ctx, pendingReqKey(reqID))
+}
+
+// TaskLink returns the link of a task.
+func (s *Store) TaskLink(ctx context.Context, taskID int64) (*Link, error) {
+	var l Link
+	if err := s.getJSON(ctx, taskLinkKey(taskID), &l); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+// TaskLinkByIssue returns the link of a sub-issue (by node id).
+func (s *Store) TaskLinkByIssue(ctx context.Context, nodeID string) (*Link, error) {
+	b, err := s.kv.Get(ctx, taskIssueKey(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	var taskID int64
+	if err := json.Unmarshal(b, &taskID); err != nil {
+		return nil, err
+	}
+	return s.TaskLink(ctx, taskID)
+}
+
+// SaveTaskLink stores a task's link, its issue index and the project's task index.
+func (s *Store) SaveTaskLink(ctx context.Context, l *Link) error {
+	if l.TaskID == 0 {
+		return errors.New("state: a task link needs its task id")
+	}
+	l.SyncedAt = time.Now().UTC()
+	if err := s.putJSON(ctx, taskLinkKey(l.TaskID), l); err != nil {
+		return err
+	}
+	if err := s.putJSON(ctx, taskIssueKey(l.IssueNodeID), l.TaskID); err != nil {
+		return err
+	}
+	return s.UpdateProject(ctx, l.JikuProject, func(p *ProjectState) {
+		for _, id := range p.TaskLinks {
+			if id == l.TaskID {
+				return
+			}
+		}
+		p.TaskLinks = append(p.TaskLinks, l.TaskID)
+	})
+}
+
+// Save stores a link of either kind.
+func (s *Store) Save(ctx context.Context, l *Link) error {
+	if l.IsTask() {
+		return s.SaveTaskLink(ctx, l)
+	}
+	return s.SaveLink(ctx, l)
+}
+
+// PendingTask returns the in-flight creation of a sub-issue for a task.
+func (s *Store) PendingTask(ctx context.Context, taskID int64) (*Pending, error) {
+	var p Pending
+	if err := s.getJSON(ctx, pendingTaskKey(taskID), &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SetPendingTask records that a sub-issue is about to be created for a task.
+func (s *Store) SetPendingTask(ctx context.Context, taskID int64, p Pending) error {
+	return s.putJSON(ctx, pendingTaskKey(taskID), p)
+}
+
+// ClearPendingTask removes the record.
+func (s *Store) ClearPendingTask(ctx context.Context, taskID int64) error {
+	return s.kv.Delete(ctx, pendingTaskKey(taskID))
+}
+
+// PendingSubIssue returns the in-flight creation of a task for a sub-issue.
+func (s *Store) PendingSubIssue(ctx context.Context, nodeID string) (*Pending, error) {
+	var p Pending
+	if err := s.getJSON(ctx, pendingSubIssueKey(nodeID), &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SetPendingSubIssue records that a task is about to be created for a sub-issue.
+func (s *Store) SetPendingSubIssue(ctx context.Context, nodeID string, p Pending) error {
+	return s.putJSON(ctx, pendingSubIssueKey(nodeID), p)
+}
+
+// ClearPendingSubIssue removes the record.
+func (s *Store) ClearPendingSubIssue(ctx context.Context, nodeID string) error {
+	return s.kv.Delete(ctx, pendingSubIssueKey(nodeID))
 }

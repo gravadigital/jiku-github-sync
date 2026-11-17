@@ -29,6 +29,11 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-17
+
+Tasks of the requirements, synced with sub-issues of their issues. Off until a project turns it on:
+an installation upgraded from 1.0.0 keeps working exactly as before, on the same state.
+
 ### Added
 
 - **Tasks ↔ sub-issues (opt-in per project, `tasks.enabled`).** A public task of a synced requirement

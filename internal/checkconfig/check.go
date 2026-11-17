@@ -126,6 +126,9 @@ func project(ctx context.Context, gh GitHub, p *mapping.Project) []Finding {
 	if st := fm.Status; st != nil {
 		checkSelect(add, s, "status", st.Field, keysOf(st.ToJiku), valuesOf(st.ToGithub))
 	}
+	if st := fm.TaskStatus; st != nil && p.TasksEnabled() {
+		checkSelect(add, s, "taskStatus", st.Field, keysOf(st.ToJiku), valuesOf(st.ToGithub))
+	}
 	if pr := fm.Priority; pr != nil {
 		checkSelect(add, s, "priority", pr.Field, keysOfStr(pr.ToJiku), valuesOf(pr.Map))
 	}

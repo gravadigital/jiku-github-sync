@@ -169,3 +169,36 @@ projects:
 		}
 	}
 }
+
+func TestTasks(t *testing.T) {
+	f := loadExample(t)
+	p := f.Project(123)
+	if !p.TasksEnabled() || p.TaskInitialSyncMode() != InitialSyncPlan {
+		t.Fatalf("the example turns tasks on, in plan mode: %+v", p.Tasks)
+	}
+	if tg, ok := p.TaskStatus().Target("In Progress"); !ok || tg.State != "activo" {
+		t.Fatalf("In Progress -> %+v %v", tg, ok)
+	}
+	if opt, set := p.TaskStatus().Option("cancelado"); set || opt != "" {
+		t.Fatalf("cancelado -> null must leave the card: %q %v", opt, set)
+	}
+	off, err := Parse([]byte("projects:\n  - { jikuProject: 1, repos: [a/b], defaultRepo: a/b }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Project(1).TasksEnabled() || off.Project(1).TaskStatus() != nil {
+		t.Fatal("without a tasks section tasks are off")
+	}
+	_, err = Parse([]byte(`
+fieldMappings:
+  m:
+    taskStatus: { field: Status, toJiku: { "X": analisis }, toGithub: { resuelto: "Done" } }
+projects:
+  - { jikuProject: 1, repos: [a/b], defaultRepo: a/b, fieldMapping: m, tasks: { enabled: true, initialSync: maybe } }
+`))
+	for _, want := range []string{`taskStatus.toJiku["X"]: "analisis"`, `taskStatus.toGithub: "resuelto"`, `tasks.initialSync: "maybe"`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q in %v", want, err)
+		}
+	}
+}

@@ -9,6 +9,7 @@
 #   states:     analisis, planificacion, en_cola, desarrollo, revision, resuelto, cancelado
 #   priorities: sin_prioridad, baja, media, alta, urgente
 #   types:      funcionalidad, mejora, incidencia, otro
+#   task states: backlog, activo, en_revision, finalizado, cancelado
 
 # GitHub credentials, one per client, by name. The secrets never go in this file: it only says
 # where to read them. Without this section every project uses GITHUB_TOKEN.
@@ -43,7 +44,24 @@ fieldMappings:
         revision: "Review"
         resuelto: "Done"
         cancelado: null
-    priority:
+    taskStatus:                                 # the same field, for tasks' sub-issues (optional:
+      field: Status                             #   without it they are not added to the Project
+      toJiku:                                   #   and only open/closed is synced)
+        "Inbox": backlog
+        "Ideas": backlog
+        "Backlog": backlog
+        "Ready": backlog
+        "In Progress": activo
+        "Blocked": { state: activo, comment: "Marcada como {option} en GitHub por @{login}" }
+        "Review": en_revision
+        "Done": finalizado
+      toGithub:
+        backlog: "Backlog"
+        activo: "In Progress"
+        en_revision: "Review"
+        finalizado: "Done"
+        cancelado: null
+    priority:                                   # tasks use it too
       field: Priority
       map:                                      # Jiku priority -> option (null: empty field)
         urgente: "Critical"
@@ -84,3 +102,14 @@ projects:
     # A requirement and an issue that already exist are linked only when their titles are
     # exactly the same (and unique on each side); everything else is created on the other side.
     initialSync: plan
+    # Tasks (optional, off without this section): a public task of a synced requirement is a
+    # sub-issue of the requirement's issue (same repo), and a new sub-issue of a synced issue is a
+    # public task of its requirement. Moving a task to another requirement moves the sub-issue,
+    # and the other way round. Sub-issues of sub-issues are ignored (Jiku has no subtasks).
+    tasks:
+      enabled: true
+      # What already existed when tasks were turned on (open public tasks of synced requirements
+      # and open sub-issues of their issues), as initialSync above: plan (default), apply or off.
+      # It runs after the requirements' initial sync.
+      initialSync: plan
+      issueType: Task                           # issue type of the sub-issues it creates (optional)

@@ -22,6 +22,8 @@ var (
 	JikuStates     = []string{"analisis", "planificacion", "en_cola", "desarrollo", "revision", "resuelto", "cancelado"}
 	JikuPriorities = []string{"sin_prioridad", "baja", "media", "alta", "urgente"}
 	JikuTypes      = []string{"funcionalidad", "mejora", "incidencia", "otro"}
+	// JikuTaskStates are the states of a task, which are not the requirement's.
+	JikuTaskStates = []string{"backlog", "activo", "en_revision", "finalizado", "cancelado"}
 )
 
 // File is the whole configuration file.
@@ -86,9 +88,35 @@ type Project struct {
 	// mapped: "plan" (default: compute the plan and log it, write nothing), "apply" (run it once;
 	// it is recorded in the state and never repeated) or "off".
 	InitialSync string `yaml:"initialSync"`
+	// Tasks turns on the sync of the requirements' public tasks with sub-issues. Without it (the
+	// default) tasks are not synced and a sub-issue is imported like any other issue.
+	Tasks *TasksConfig `yaml:"tasks"`
 
 	// Fields is the resolved preset (nil when none). Filled by Load.
 	Fields *FieldMapping `yaml:"-"`
+}
+
+// TasksConfig is the sync of tasks with sub-issues: a public task of a synced requirement is a
+// sub-issue of the requirement's issue, and the other way round.
+type TasksConfig struct {
+	// Enabled turns it on.
+	Enabled bool `yaml:"enabled"`
+	// InitialSync is what happens with the tasks and sub-issues that already existed when tasks
+	// were turned on: plan (default), apply or off, as the project's initialSync.
+	InitialSync string `yaml:"initialSync"`
+	// IssueType is the issue type given to the sub-issues created from tasks (optional).
+	IssueType string `yaml:"issueType"`
+}
+
+// TasksEnabled reports whether the project syncs tasks.
+func (p *Project) TasksEnabled() bool { return p.Tasks != nil && p.Tasks.Enabled }
+
+// TaskInitialSyncMode returns the mode of the tasks' initial sync, "plan" when unset.
+func (p *Project) TaskInitialSyncMode() string {
+	if p.Tasks == nil || p.Tasks.InitialSync == "" {
+		return InitialSyncPlan
+	}
+	return p.Tasks.InitialSync
 }
 
 // Initial sync modes.
@@ -109,9 +137,12 @@ func (p *Project) InitialSyncMode() string {
 // FieldMapping says how the fields of a GitHub Project (and the issue type) translate to Jiku.
 // Every part is optional: a missing part is simply not synced.
 type FieldMapping struct {
-	Status   *StatusMapping   `yaml:"status"`
-	Priority *PriorityMapping `yaml:"priority"`
-	Type     *TypeMapping     `yaml:"type"`
+	Status *StatusMapping `yaml:"status"`
+	// TaskStatus maps the same Status field (or another) to a task's states. Without it the
+	// sub-issues of tasks are not added to the Project and only open/closed is synced.
+	TaskStatus *StatusMapping   `yaml:"taskStatus"`
+	Priority   *PriorityMapping `yaml:"priority"`
+	Type       *TypeMapping     `yaml:"type"`
 }
 
 // StatusMapping maps the single-select Status field to Jiku's state.
@@ -274,6 +305,13 @@ func (f *File) validate() error {
 		default:
 			errs = append(errs, fmt.Errorf("%s.initialSync: %q is not plan, apply or off", at, p.InitialSync))
 		}
+		if p.Tasks != nil {
+			switch p.Tasks.InitialSync {
+			case "", InitialSyncPlan, InitialSyncApply, InitialSyncOff:
+			default:
+				errs = append(errs, fmt.Errorf("%s.tasks.initialSync: %q is not plan, apply or off", at, p.Tasks.InitialSync))
+			}
+		}
 		if p.FieldMapping != "" {
 			fm, ok := f.FieldMappings[p.FieldMapping]
 			if !ok {
@@ -285,22 +323,31 @@ func (f *File) validate() error {
 	return errors.Join(errs...)
 }
 
+func (s *StatusMapping) validate(at string, states []string) []error {
+	var errs []error
+	if s.Field == "" {
+		errs = append(errs, fmt.Errorf("%s.field is required", at))
+	}
+	for opt, t := range s.ToJiku {
+		if !contains(states, t.State) {
+			errs = append(errs, fmt.Errorf("%s.toJiku[%q]: %q is not a Jiku state", at, opt, t.State))
+		}
+	}
+	for st := range s.ToGithub {
+		if !contains(states, st) {
+			errs = append(errs, fmt.Errorf("%s.toGithub: %q is not a Jiku state", at, st))
+		}
+	}
+	return errs
+}
+
 func (fm *FieldMapping) validate(at string) []error {
 	var errs []error
 	if s := fm.Status; s != nil {
-		if s.Field == "" {
-			errs = append(errs, fmt.Errorf("%s.status.field is required", at))
-		}
-		for opt, t := range s.ToJiku {
-			if !contains(JikuStates, t.State) {
-				errs = append(errs, fmt.Errorf("%s.status.toJiku[%q]: %q is not a Jiku state", at, opt, t.State))
-			}
-		}
-		for st := range s.ToGithub {
-			if !contains(JikuStates, st) {
-				errs = append(errs, fmt.Errorf("%s.status.toGithub: %q is not a Jiku state", at, st))
-			}
-		}
+		errs = append(errs, s.validate(at+".status", JikuStates)...)
+	}
+	if s := fm.TaskStatus; s != nil {
+		errs = append(errs, s.validate(at+".taskStatus", JikuTaskStates)...)
 	}
 	if p := fm.Priority; p != nil {
 		if p.Field == "" {
@@ -375,20 +422,46 @@ func (p *Project) HasRepo(repo string) bool {
 // StateFromOption maps a Status option to its Jiku target. ok is false when the option is not
 // mapped (or there is no status mapping).
 func (p *Project) StateFromOption(option string) (StatusTarget, bool) {
-	if p.Fields == nil || p.Fields.Status == nil {
+	if p.Fields == nil {
 		return StatusTarget{}, false
 	}
-	t, ok := p.Fields.Status.ToJiku[option]
-	return t, ok
+	return p.Fields.Status.Target(option)
 }
 
 // OptionForState maps a Jiku state to a Status option. set is false when the field must be left
 // as it is (not mapped, or mapped to null).
 func (p *Project) OptionForState(state string) (option string, set bool) {
-	if p.Fields == nil || p.Fields.Status == nil {
+	if p.Fields == nil {
 		return "", false
 	}
-	v, ok := p.Fields.Status.ToGithub[state]
+	return p.Fields.Status.Option(state)
+}
+
+// TaskStatus returns the status mapping of tasks, nil when there is none.
+func (p *Project) TaskStatus() *StatusMapping {
+	if p.Fields == nil {
+		return nil
+	}
+	return p.Fields.TaskStatus
+}
+
+// Target maps an option to its Jiku target. ok is false when the option is not mapped (or s is
+// nil).
+func (s *StatusMapping) Target(option string) (StatusTarget, bool) {
+	if s == nil {
+		return StatusTarget{}, false
+	}
+	t, ok := s.ToJiku[option]
+	return t, ok
+}
+
+// Option maps a Jiku state to an option. set is false when the field must be left as it is (not
+// mapped, mapped to null, or s is nil).
+func (s *StatusMapping) Option(state string) (option string, set bool) {
+	if s == nil {
+		return "", false
+	}
+	v, ok := s.ToGithub[state]
 	if !ok || v == nil {
 		return "", false
 	}

@@ -12,6 +12,8 @@ import (
 
 // Issue is the subset of an issue the connector uses.
 type Issue struct {
+	// ID is the numeric id, which the sub-issue endpoints take (not the number).
+	ID          int64
 	NodeID      string
 	Repo        string // owner/name
 	Number      int
@@ -27,6 +29,20 @@ type Issue struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	IsPR        bool
+	// ParentRepo and ParentNumber are the parent issue, when this one is a sub-issue.
+	ParentRepo   string
+	ParentNumber int
+}
+
+// HasParent reports whether the issue is a sub-issue.
+func (i *Issue) HasParent() bool { return i.ParentNumber != 0 }
+
+// ParentKey is the parent as "owner/repo#number" ("" without parent).
+func (i *Issue) ParentKey() string {
+	if !i.HasParent() {
+		return ""
+	}
+	return fmt.Sprintf("%s#%d", i.ParentRepo, i.ParentNumber)
 }
 
 // Open reports whether the issue is open.
@@ -48,6 +64,7 @@ type restUser struct {
 }
 
 type restIssue struct {
+	ID          int64                  `json:"id"`
 	NodeID      string                 `json:"node_id"`
 	Number      int                    `json:"number"`
 	Title       string                 `json:"title"`
@@ -64,12 +81,13 @@ type restIssue struct {
 	Labels      []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
-	RepositoryURL string `json:"repository_url"`
+	RepositoryURL  string  `json:"repository_url"`
+	ParentIssueURL *string `json:"parent_issue_url"`
 }
 
 func (r *restIssue) toIssue(repo string) *Issue {
 	i := &Issue{
-		NodeID: r.NodeID, Repo: repo, Number: r.Number, Title: r.Title, State: r.State,
+		ID: r.ID, NodeID: r.NodeID, Repo: repo, Number: r.Number, Title: r.Title, State: r.State,
 		HTMLURL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, IsPR: r.PullRequest != nil,
 	}
 	if r.Body != nil {
@@ -93,7 +111,24 @@ func (r *restIssue) toIssue(repo string) *Issue {
 	if i.Repo == "" {
 		i.Repo = repoFromURL(r.RepositoryURL)
 	}
+	if r.ParentIssueURL != nil {
+		i.ParentRepo, i.ParentNumber = issueFromURL(*r.ParentIssueURL)
+	}
 	return i
+}
+
+// issueFromURL reads ".../repos/owner/name/issues/12".
+func issueFromURL(u string) (string, int) {
+	rest := repoFromURL(u)
+	repo, num, ok := strings.Cut(rest, "/issues/")
+	if !ok {
+		return "", 0
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return "", 0
+	}
+	return repo, n
 }
 
 func repoFromURL(u string) string {

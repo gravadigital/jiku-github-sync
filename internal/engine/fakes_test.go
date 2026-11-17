@@ -53,6 +53,8 @@ type fakeGH struct {
 	// assets are the uploaded attachments (url -> file); html is what IssueHTML/CommentHTML
 	// answer (a signed link per asset, like GitHub in a private repo).
 	assets map[string]fakeFile
+	// parentLog is the timeline of parent changes (sub-issue node -> changes).
+	parentLog map[string][]github.ParentChange
 }
 
 type fakeFile struct {
@@ -63,7 +65,7 @@ type fakeFile struct {
 func newFakeGH(clk *clock) *fakeGH {
 	return &fakeGH{clk: clk, issues: map[string]*github.Issue{}, comms: map[string][]*github.Comment{},
 		items: map[string]*github.Item{}, nextNum: map[string]int{}, nextID: 1000, statusLog: map[string][]github.StatusChange{},
-		assets: map[string]fakeFile{}}
+		assets: map[string]fakeFile{}, parentLog: map[string][]github.ParentChange{}}
 }
 
 func (f *fakeGH) write(s string, a ...any) { f.writes = append(f.writes, fmt.Sprintf(s, a...)) }
@@ -98,7 +100,8 @@ func (f *fakeGH) newIssue(repo, title, body, author string) *github.Issue {
 	f.nextNum[repo]++
 	n := f.nextNum[repo]
 	now := f.clk.tick()
-	is := &github.Issue{NodeID: fmt.Sprintf("I_%s_%d", strings.ReplaceAll(repo, "/", "_"), n), Repo: repo, Number: n,
+	f.nextID++
+	is := &github.Issue{ID: f.nextID, NodeID: fmt.Sprintf("I_%s_%d", strings.ReplaceAll(repo, "/", "_"), n), Repo: repo, Number: n,
 		Title: title, Body: body, State: "open", Author: author, HTMLURL: fmt.Sprintf("https://github.com/%s/issues/%d", repo, n),
 		CreatedAt: now, UpdatedAt: now}
 	f.issues[is.NodeID] = is
@@ -140,6 +143,84 @@ func (f *fakeGH) comment(node, author, body string) *github.Comment {
 		HTMLURL: fmt.Sprintf("%s#issuecomment-%d", is.HTMLURL, f.nextID), CreatedAt: now, UpdatedAt: now}
 	f.comms[node] = append(f.comms[node], c)
 	return c
+}
+
+func (f *fakeGH) byID(id int64) *github.Issue {
+	for _, is := range f.issues {
+		if is.ID == id {
+			return is
+		}
+	}
+	return nil
+}
+
+// setParent simulates a person linking (parent != nil) or unlinking a sub-issue. Like GitHub, it
+// does not change either issue's updated_at.
+func (f *fakeGH) setParent(node string, parent *github.Issue, by string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.parentTo(f.issues[node], parent, by)
+}
+
+func (f *fakeGH) parentTo(is, parent *github.Issue, by string) {
+	at := f.clk.tick()
+	if parent == nil {
+		f.parentLog[is.NodeID] = append(f.parentLog[is.NodeID], github.ParentChange{Added: false, Parent: is.ParentKey(), Actor: by, CreatedAt: at})
+		is.ParentRepo, is.ParentNumber = "", 0
+		return
+	}
+	is.ParentRepo, is.ParentNumber = parent.Repo, parent.Number
+	f.parentLog[is.NodeID] = append(f.parentLog[is.NodeID], github.ParentChange{Added: true, Parent: is.ParentKey(), Actor: by, CreatedAt: at})
+}
+
+func (f *fakeGH) AddSubIssue(_ context.Context, parentRepo string, parentNumber int, subID int64, replace bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	parent, sub := f.byNum(parentRepo, parentNumber), f.byID(subID)
+	if parent == nil || sub == nil {
+		return &github.APIError{Status: 404, Message: "not found"}
+	}
+	if sub.HasParent() && !replace {
+		return &github.APIError{Status: 422, Message: "Sub issue may only have one parent"}
+	}
+	f.parentTo(sub, parent, "connector")
+	f.write("sub-issue %s#%d under %s#%d", sub.Repo, sub.Number, parentRepo, parentNumber)
+	return nil
+}
+
+func (f *fakeGH) RemoveSubIssue(_ context.Context, parentRepo string, parentNumber int, subID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sub := f.byID(subID)
+	if sub == nil || sub.ParentNumber != parentNumber || !strings.EqualFold(sub.ParentRepo, parentRepo) {
+		return &github.APIError{Status: 404, Message: "not found"}
+	}
+	f.parentTo(sub, nil, "connector")
+	f.write("sub-issue %s#%d detached", sub.Repo, sub.Number)
+	return nil
+}
+
+func (f *fakeGH) LastParentChange(_ context.Context, node string) (*github.ParentChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l := f.parentLog[node]
+	if len(l) == 0 {
+		return nil, nil
+	}
+	pc := l[len(l)-1]
+	return &pc, nil
+}
+
+func (f *fakeGH) ListSubIssues(_ context.Context, repo string, n int) ([]*github.Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*github.Issue
+	for _, is := range f.issues {
+		if is.ParentNumber == n && strings.EqualFold(is.ParentRepo, repo) {
+			out = append(out, cp(is))
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeGH) GetIssue(_ context.Context, repo string, n int) (*github.Issue, error) {
@@ -390,13 +471,15 @@ type fakeJiku struct {
 	clk    *clock
 	self   string
 	reqs   map[int64]*jiku.Requirement
-	comms  map[int64][]*jiku.Comment
+	tasks  map[int64]*jiku.Task
+	comms  map[jiku.Ref][]*jiku.Comment
 	nextID int64
 	writes []string
 }
 
 func newFakeJiku(clk *clock) *fakeJiku {
-	return &fakeJiku{clk: clk, self: "connector-sub", reqs: map[int64]*jiku.Requirement{}, comms: map[int64][]*jiku.Comment{}, nextID: 100, files: map[int64]fakeFile{}}
+	return &fakeJiku{clk: clk, self: "connector-sub", reqs: map[int64]*jiku.Requirement{}, tasks: map[int64]*jiku.Task{},
+		comms: map[jiku.Ref][]*jiku.Comment{}, nextID: 100, files: map[int64]fakeFile{}}
 }
 
 func (f *fakeJiku) takeWrites() []string {
@@ -442,6 +525,10 @@ func (f *fakeJiku) editReq(id int64, fn func(*jiku.Requirement)) {
 }
 
 func (f *fakeJiku) personComment(req int64, body, vis string) *jiku.Comment {
+	return f.personCommentOn(jiku.ReqRef(req), body, vis)
+}
+
+func (f *fakeJiku) personCommentOn(on jiku.Ref, body, vis string) *jiku.Comment {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -451,7 +538,7 @@ func (f *fakeJiku) personComment(req int64, body, vis string) *jiku.Comment {
 		Name     string `json:"name"`
 		Username string `json:"username"`
 	}{Name: "Ana Pérez"}
-	f.comms[req] = append(f.comms[req], c)
+	f.comms[on] = append(f.comms[on], c)
 	return c
 }
 
@@ -529,32 +616,32 @@ func (f *fakeJiku) EditRequirement(_ context.Context, id int64, fields map[strin
 	return nil
 }
 
-func (f *fakeJiku) ListComments(_ context.Context, req int64) ([]*jiku.Comment, error) {
+func (f *fakeJiku) ListComments(_ context.Context, on jiku.Ref) ([]*jiku.Comment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []*jiku.Comment
-	for _, c := range f.comms[req] {
+	for _, c := range f.comms[on] {
 		cc := *c
 		out = append(out, &cc)
 	}
 	return out, nil
 }
 
-func (f *fakeJiku) CreateComment(_ context.Context, req int64, body, vis string, fileIDs []int64) (int64, error) {
+func (f *fakeJiku) CreateComment(_ context.Context, on jiku.Ref, body, vis string, fileIDs []int64) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
 	now := f.clk.tick()
-	f.comms[req] = append(f.comms[req], &jiku.Comment{ID: f.nextID, Body: body, AuthorID: f.self, VisibilityLevel: vis, CreatedAt: now, UpdatedAt: now,
+	f.comms[on] = append(f.comms[on], &jiku.Comment{ID: f.nextID, Body: body, AuthorID: f.self, VisibilityLevel: vis, CreatedAt: now, UpdatedAt: now,
 		Attachments: f.attachments(fileIDs)})
 	f.writes = append(f.writes, fmt.Sprintf("%s comment %q", vis, firstLine(body)))
 	return f.nextID, nil
 }
 
-func (f *fakeJiku) EditComment(_ context.Context, req, cid int64, body string, fileIDs []int64) error {
+func (f *fakeJiku) EditComment(_ context.Context, on jiku.Ref, cid int64, body string, fileIDs []int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, c := range f.comms[req] {
+	for _, c := range f.comms[on] {
 		if c.ID == cid {
 			if c.AuthorID != f.self {
 				return fmt.Errorf("activity_not_editable")
@@ -573,7 +660,7 @@ func (f *fakeJiku) EditComment(_ context.Context, req, cid int64, body string, f
 func (f *fakeJiku) personEditComment(req, cid int64, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, c := range f.comms[req] {
+	for _, c := range f.comms[jiku.ReqRef(req)] {
 		if c.ID == cid {
 			c.Body = body
 		}
@@ -714,4 +801,129 @@ func (f *fakeJiku) attachments(ids []int64) []jiku.Attachment {
 		out = append(out, jiku.Attachment{ID: id + 5000, FileID: id, FileName: a.name, MimeType: a.mime, FileSize: int64(len(a.data))})
 	}
 	return out
+}
+
+// ---- Jiku tasks ----
+
+func cpTask(t *jiku.Task) *jiku.Task {
+	c := *t
+	if t.Description != nil {
+		d := *t.Description
+		c.Description = &d
+	}
+	if t.RequirementID != nil {
+		r := *t.RequirementID
+		c.RequirementID = &r
+	}
+	c.Attachments = append([]jiku.Attachment(nil), t.Attachments...)
+	return &c
+}
+
+// newTask simulates a person creating a task of a requirement (req 0: none).
+func (f *fakeJiku) newTask(project, req int64, title, desc, visibility string) *jiku.Task {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	now := f.clk.tick()
+	t := &jiku.Task{ID: f.nextID, Title: title, Description: &desc, Priority: "sin_prioridad", State: "backlog",
+		ProjectID: project, CreatedBy: "person", VisibilityLevel: visibility, CreatedAt: now, UpdatedAt: now}
+	if req != 0 {
+		t.RequirementID = &req
+	}
+	f.tasks[t.ID] = t
+	return cpTask(t)
+}
+
+// editTask simulates a person editing a task.
+func (f *fakeJiku) editTask(id int64, fn func(*jiku.Task)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f.tasks[id])
+	f.tasks[id].UpdatedAt = f.clk.tick()
+}
+
+func (f *fakeJiku) GetTask(_ context.Context, id int64) (*jiku.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.tasks[id]
+	if t == nil {
+		return nil, jiku.ErrNotFound
+	}
+	return cpTask(t), nil
+}
+
+func (f *fakeJiku) ListTasks(_ context.Context, project int64, filter map[string]any) ([]*jiku.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*jiku.Task
+	for _, t := range f.tasks {
+		if t.ProjectID != project {
+			continue
+		}
+		if cb, ok := filter["createdBy"]; ok && t.CreatedBy != cb {
+			continue
+		}
+		if v, ok := filter["visibilityLevel"]; ok && t.VisibilityLevel != v {
+			continue
+		}
+		if v, ok := filter["requirementId"]; ok && t.Req() != v.(int64) {
+			continue
+		}
+		c := cpTask(t)
+		c.Attachments = nil // the tasks resource does not include them
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (f *fakeJiku) CreateTask(_ context.Context, in jiku.NewTask) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in.ResponsiblePersonIDs == nil {
+		in.ResponsiblePersonIDs = []int64{}
+	}
+	if r := f.reqs[in.RequirementID]; in.RequirementID != 0 && (r == nil || r.ProjectID != in.ProjectID) {
+		return 0, fmt.Errorf("requirement_project_mismatch")
+	}
+	f.nextID++
+	now := f.clk.tick()
+	desc, req := in.Description, in.RequirementID
+	t := &jiku.Task{ID: f.nextID, Title: in.Title, Description: &desc, Priority: "sin_prioridad", State: "backlog",
+		ProjectID: in.ProjectID, RequirementID: &req, CreatedBy: f.self, VisibilityLevel: in.VisibilityLevel, CreatedAt: now, UpdatedAt: now}
+	if in.State != "" {
+		t.State = in.State
+	}
+	t.Attachments = f.attachments(in.FileIDs)
+	f.tasks[t.ID] = t
+	f.writes = append(f.writes, fmt.Sprintf("create task %d", t.ID))
+	return t.ID, nil
+}
+
+func (f *fakeJiku) EditTask(_ context.Context, id int64, fields map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.tasks[id]
+	for k, v := range fields {
+		switch k {
+		case "title":
+			t.Title = v.(string)
+		case "description":
+			d := v.(string)
+			t.Description = &d
+		case "state":
+			t.State = v.(string)
+		case "priority":
+			t.Priority = v.(string)
+		case "requirementId":
+			r := v.(int64)
+			t.RequirementID = &r
+		case "fileIds":
+			t.Attachments = f.attachments(v.([]int64))
+		default:
+			return fmt.Errorf("invalid_fields: %s", k)
+		}
+		f.writes = append(f.writes, fmt.Sprintf("task.%s=%v", k, v))
+	}
+	t.UpdatedAt = f.clk.tick()
+	return nil
 }

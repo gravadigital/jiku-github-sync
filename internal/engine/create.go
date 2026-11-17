@@ -24,6 +24,13 @@ var attrRe = regexp.MustCompile(`^\*\*@([^*]+)\*\* comentó en \[GitHub\]\(([^)]
 func (e *Engine) ImportIssue(ctx context.Context, p *mapping.Project, is *github.Issue, opts SyncOptions) (*state.Link, error) {
 	log := e.log.With("issue", fmt.Sprintf("%s#%d", is.Repo, is.Number))
 
+	// A sub-issue the connector created from a task is never a requirement (its link is
+	// recovered by the tasks' path, under its parent).
+	if _, ok := text.TaskID(is.Body); ok {
+		log.Warn("an issue the connector created for a task has no pair and is not under a synced issue: not imported")
+		return nil, nil
+	}
+
 	// An issue the connector created from a requirement: link it, never import it.
 	if reqID, ok := text.RequirementID(is.Body); ok {
 		if l, err := e.st.Link(ctx, reqID); err == nil {
@@ -189,7 +196,11 @@ func (e *Engine) linkExported(ctx context.Context, p *mapping.Project, req *jiku
 		return nil, err
 	}
 	_ = e.st.ClearPendingRequirement(ctx, req.ID)
-	return l, e.SyncLink(ctx, l, opts)
+	if err := e.SyncLink(ctx, l, opts); err != nil {
+		return l, err
+	}
+	// Its public tasks follow it.
+	return l, e.followRequirement(ctx, p, l)
 }
 
 // findCreatedIssue looks for the issue the connector created for a requirement after a pending

@@ -24,18 +24,24 @@ const (
 	InitialSync
 	// Verify compares both sides of every pair of a project and logs the differences.
 	Verify
+	// Task is a Jiku task id.
+	Task
+	// TaskInitialSync runs (or plans) the initial sync of a project's tasks.
+	TaskInitialSync
 )
 
 // Key identifies something to sync.
 type Key struct {
 	Kind   Kind
 	ReqID  int64
+	TaskID int64
 	Repo   string
 	Number int
 	Node   string
 	// Project is the Jiku project of InitialSync and Verify.
 	Project int64
-	// BecamePublic is set when Jiku says the requirement just became public (R4).
+	// BecamePublic is set when Jiku says the requirement (or task) just became public (R4), or a
+	// task moved to another requirement.
 	BecamePublic bool
 }
 
@@ -49,6 +55,10 @@ func (k Key) id() string {
 		return fmt.Sprintf("s:%d", k.Project)
 	case Verify:
 		return fmt.Sprintf("v:%d", k.Project)
+	case Task:
+		return fmt.Sprintf("t:%d", k.TaskID)
+	case TaskInitialSync:
+		return fmt.Sprintf("ts:%d", k.Project)
 	default:
 		return "n:" + k.Node
 	}

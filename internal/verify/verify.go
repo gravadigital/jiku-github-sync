@@ -20,13 +20,17 @@ import (
 
 // Report is the outcome of a verification.
 type Report struct {
-	Pairs      int
-	PairsOK    int
-	Unlinked   int // tombstones (requirement became internal)
-	Diffs      []string
-	Missing    []string // open public requirements / open issues with no pair
-	CommentsJ  int      // public Jiku comments checked
-	CommentsGH int      // GitHub comments checked
+	Pairs    int
+	PairsOK  int
+	Unlinked int // tombstones (requirement became internal)
+	// TaskPairs, TaskPairsOK and TasksUnlinked are the same for tasks (with tasks turned on).
+	TaskPairs     int
+	TaskPairsOK   int
+	TasksUnlinked int
+	Diffs         []string
+	Missing       []string // open public requirements / open issues with no pair
+	CommentsJ     int      // public Jiku comments checked
+	CommentsGH    int      // GitHub comments checked
 }
 
 // Run verifies a project.
@@ -62,6 +66,54 @@ func Run(ctx context.Context, gh engine.GitHub, ghl lister, jk jiku.API, st *sta
 			r.Diffs = append(r.Diffs, fmt.Sprintf("req %d ↔ %s: %s", l.ReqID, l.IssueKey(), d))
 		}
 	}
+	// Tasks: every pair, and the open public tasks of synced requirements with no pair.
+	linkedTask := map[int64]bool{}
+	liveReq := map[string]int64{} // issue "owner/repo#n" (lower case) of each synced requirement
+	if p.TasksEnabled() {
+		for _, id := range ps.Links {
+			if l, err := st.Link(ctx, id); err == nil && !l.Unlinked {
+				liveReq[strings.ToLower(l.IssueKey())] = l.ReqID
+			}
+		}
+		for _, id := range ps.TaskLinks {
+			l, err := st.TaskLink(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("task link %d: %w", id, err)
+			}
+			linkedTask[l.TaskID] = true
+			linkedIssue[l.IssueNodeID] = true
+			if l.Unlinked {
+				r.TasksUnlinked++
+				continue
+			}
+			r.TaskPairs++
+			diffs, err := taskPair(ctx, gh, jk, st, p, l, r)
+			if err != nil {
+				r.Diffs = append(r.Diffs, fmt.Sprintf("tarea %d ↔ %s: %v", l.TaskID, l.IssueKey(), err))
+				continue
+			}
+			if len(diffs) == 0 {
+				r.TaskPairsOK++
+			}
+			for _, d := range diffs {
+				r.Diffs = append(r.Diffs, fmt.Sprintf("tarea %d ↔ %s: %s", l.TaskID, l.IssueKey(), d))
+			}
+		}
+		tasks, err := jk.ListTasks(ctx, p.JikuProject, map[string]any{"visibilityLevel": "public"})
+		if err != nil {
+			return nil, err
+		}
+		synced := map[int64]bool{}
+		for _, id := range liveReq {
+			synced[id] = true
+		}
+		for _, t := range tasks {
+			if !linkedTask[t.ID] && synced[t.Req()] && t.State != "finalizado" && t.State != "cancelado" {
+				r.Missing = append(r.Missing, fmt.Sprintf("tarea pública abierta %d del requisito %d sin sub-issue: %q", t.ID, t.Req(), t.Title))
+			}
+		}
+	}
+
 	reqs, err := jk.ListRequirements(ctx, p.JikuProject, map[string]any{"visibilityLevel": "public"})
 	if err != nil {
 		return nil, err
@@ -77,9 +129,21 @@ func Run(ctx context.Context, gh engine.GitHub, ghl lister, jk jiku.API, st *sta
 			return nil, err
 		}
 		for _, is := range issues {
-			if !is.IsPR && !linkedIssue[is.NodeID] {
-				r.Missing = append(r.Missing, fmt.Sprintf("issue abierto %s#%d sin requisito: %q", is.Repo, is.Number, is.Title))
+			if is.IsPR || linkedIssue[is.NodeID] {
+				continue
 			}
+			if p.TasksEnabled() && is.HasParent() {
+				if req, ok := liveReq[strings.ToLower(is.ParentKey())]; ok {
+					r.Missing = append(r.Missing, fmt.Sprintf("sub-issue abierto %s#%d del requisito %d sin tarea: %q", is.Repo, is.Number, req, is.Title))
+				}
+				// A sub-issue of anything else (a task's sub-issue, an issue that is not synced)
+				// is not expected to have a pair... unless its parent is not synced: then it is an
+				// issue like any other.
+				if _, ok := liveReq[strings.ToLower(is.ParentKey())]; ok || parentIsTask(ctx, gh, st, is) {
+					continue
+				}
+			}
+			r.Missing = append(r.Missing, fmt.Sprintf("issue abierto %s#%d sin requisito: %q", is.Repo, is.Number, is.Title))
 		}
 	}
 	return r, nil
@@ -147,8 +211,86 @@ func pair(ctx context.Context, gh engine.GitHub, jk jiku.API, p *mapping.Project
 		}
 	}
 
-	// Comments: every public Jiku comment by a person has its mirror, and the other way round.
-	jcs, err := jk.ListComments(ctx, req.ID)
+	cd, err := comments(ctx, gh, jk, jiku.ReqRef(req.ID), is, r)
+	return append(d, cd...), err
+}
+
+// parentIsTask reports whether an issue's parent is a task's sub-issue (a nested sub-issue,
+// which is never synced).
+func parentIsTask(ctx context.Context, gh engine.GitHub, st *state.Store, is *github.Issue) bool {
+	parent, err := gh.GetIssue(ctx, is.ParentRepo, is.ParentNumber)
+	if err != nil {
+		return false
+	}
+	_, err = st.TaskLinkByIssue(ctx, parent.NodeID)
+	return err == nil
+}
+
+func taskPair(ctx context.Context, gh engine.GitHub, jk jiku.API, st *state.Store, p *mapping.Project, l *state.Link, r *Report) ([]string, error) {
+	t, err := jk.GetTask(ctx, l.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	is, err := gh.GetIssue(ctx, l.Repo, l.Number)
+	if err != nil {
+		return nil, err
+	}
+	var d []string
+	if t.Title != is.Title {
+		d = append(d, fmt.Sprintf("título: Jiku %q / GitHub %q", t.Title, is.Title))
+	}
+	if text.Comparable(t.Desc()) != text.Comparable(is.Body) {
+		d = append(d, "descripción distinta")
+	}
+	switch t.State {
+	case "finalizado", "cancelado":
+		want := "completed"
+		if t.State == "cancelado" {
+			want = "not_planned"
+		}
+		dupOK := want == "not_planned" && is.StateReason == "duplicate"
+		if is.Open() || (is.StateReason != want && !dupOK) {
+			d = append(d, fmt.Sprintf("estado: Jiku %s / sub-issue %s %s", t.State, is.State, is.StateReason))
+		}
+	default:
+		if !is.Open() {
+			d = append(d, fmt.Sprintf("estado: Jiku %s / sub-issue cerrado", t.State))
+		}
+	}
+	// The hierarchy: the task's requirement is the sub-issue's parent.
+	if t.Req() != l.ReqID {
+		d = append(d, fmt.Sprintf("requisito: Jiku %d / último sincronizado %d", t.Req(), l.ReqID))
+	}
+	if rl, err := st.Link(ctx, l.ReqID); err == nil {
+		if !strings.EqualFold(is.ParentKey(), rl.IssueKey()) {
+			d = append(d, fmt.Sprintf("padre: GitHub %q / issue del requisito %s", is.ParentKey(), rl.IssueKey()))
+		}
+	} else if !is.HasParent() {
+		d = append(d, "el sub-issue no tiene padre")
+	}
+	var item *github.Item
+	if st := p.TaskStatus(); st != nil && p.GithubProject != "" {
+		if item, err = gh.ItemForIssue(ctx, is.NodeID, p.GithubProject); err != nil {
+			return nil, err
+		}
+		if item == nil {
+			d = append(d, "el sub-issue no está en el Project")
+		} else if is.Open() {
+			got := item.Values[st.Field].Option
+			if tg, ok := st.Target(got); !ok || tg.State != t.State {
+				d = append(d, fmt.Sprintf("columna %q no corresponde al estado %s", got, t.State))
+			}
+		}
+	}
+	cd, err := comments(ctx, gh, jk, jiku.TaskRef(t.ID), is, r)
+	return append(d, cd...), err
+}
+
+// comments checks that every public Jiku comment by a person has its mirror, and the other way
+// round.
+func comments(ctx context.Context, gh engine.GitHub, jk jiku.API, on jiku.Ref, is *github.Issue, r *Report) ([]string, error) {
+	var d []string
+	jcs, err := jk.ListComments(ctx, on)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +337,9 @@ func pair(ctx context.Context, gh engine.GitHub, jk jiku.API, p *mapping.Project
 // Render prints the report; it returns an error when something differs.
 func (r *Report) Render(w io.Writer) error {
 	fmt.Fprintf(w, "Pares vinculados: %d (%d sin diferencias), desvinculados: %d\n", r.Pairs, r.PairsOK, r.Unlinked)
+	if r.TaskPairs+r.TasksUnlinked > 0 {
+		fmt.Fprintf(w, "Tareas vinculadas: %d (%d sin diferencias), desvinculadas: %d\n", r.TaskPairs, r.TaskPairsOK, r.TasksUnlinked)
+	}
 	fmt.Fprintf(w, "Comentarios verificados: %d de Jiku, %d de GitHub\n", r.CommentsJ, r.CommentsGH)
 	if len(r.Diffs) > 0 {
 		fmt.Fprintf(w, "\nDiferencias (%d):\n  - %s\n", len(r.Diffs), strings.Join(r.Diffs, "\n  - "))

@@ -18,6 +18,7 @@ const markerPrefix = "<!-- jiku-github-sync:"
 var (
 	markerRe      = regexp.MustCompile(`\n*<!-- jiku-github-sync:[^>]*-->\s*`)
 	requirementRe = regexp.MustCompile(`<!-- jiku-github-sync:requirement=(\d+) -->`)
+	taskRe        = regexp.MustCompile(`<!-- jiku-github-sync:task=(\d+) -->`)
 	commentRe     = regexp.MustCompile(`<!-- jiku-github-sync:comment=(\d+) -->`)
 	ghCommentRe   = regexp.MustCompile(`#issuecomment-(\d+)\)`)
 )
@@ -30,6 +31,21 @@ func IssueBody(description string, reqID int64) string {
 // RequirementID returns the requirement an issue was created from, if it carries the marker.
 func RequirementID(body string) (int64, bool) {
 	m := requirementRe.FindStringSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	return id, err == nil
+}
+
+// SubIssueBody is the body of a sub-issue created from a task.
+func SubIssueBody(description string, taskID int64) string {
+	return strings.TrimRight(description, "\n") + fmt.Sprintf("\n\n%stask=%d -->", markerPrefix, taskID)
+}
+
+// TaskID returns the task a sub-issue was created from, if it carries the marker.
+func TaskID(body string) (int64, bool) {
+	m := taskRe.FindStringSubmatch(body)
 	if m == nil {
 		return 0, false
 	}

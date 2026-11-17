@@ -8,7 +8,7 @@ import (
 	"github.com/gravadigital/jiku-go/events"
 )
 
-// JikuEvents reads requirement events from Jiku's JIKU_EVENTS stream through a durable consumer,
+// JikuEvents reads requirement and task events from Jiku's JIKU_EVENTS stream through a durable consumer,
 // so events published while the connector was down are delivered when it comes back (within the
 // stream's retention). Delivery is at-least-once; the engine is idempotent, so duplicates are
 // harmless and need no dedup store.
@@ -24,11 +24,22 @@ func (j JikuEvents) Run(ctx context.Context, handle func(Event)) error {
 		return err
 	}
 	defer cons.Close()
-	return cons.Subscribe(ctx, events.Options{Filter: "requirement.>", Durable: j.Durable}, func(ev events.Event) error {
-		if ev.Entity.Type != events.EntityRequirement {
+	// Every event: task events are only used by projects with tasks turned on, which a reload of
+	// the mapping can change without restarting the subscription.
+	return cons.Subscribe(ctx, events.Options{Filter: ">", Durable: j.Durable}, func(ev events.Event) error {
+		out := Event{ID: ev.EventID, Type: ev.Type, ProjectID: ev.Entity.ProjectID, ActorID: ev.Actor.ID}
+		switch ev.Entity.Type {
+		case events.EntityRequirement:
+			out.ReqID = ev.Entity.ID
+		case events.EntityTask:
+			out.TaskID = ev.Entity.ID
+			// A task moved to another requirement may now qualify, however old it is.
+			if _, ok := ev.Change("requirementId"); ok {
+				out.BecamePublic = true
+			}
+		default:
 			return nil
 		}
-		out := Event{ID: ev.EventID, Type: ev.Type, ReqID: ev.Entity.ID, ProjectID: ev.Entity.ProjectID, ActorID: ev.Actor.ID}
 		if c, ok := ev.Change("visibilityLevel"); ok {
 			var to string
 			if json.Unmarshal(c.To, &to) == nil && to == "public" {

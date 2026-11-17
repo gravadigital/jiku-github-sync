@@ -161,7 +161,7 @@ func Build(ctx context.Context, d Deps, p *mapping.Project) (*Plan, error) {
 	// Comments to copy, for the estimate.
 	self := d.Jiku.SelfID()
 	countJ := func(id int64) error {
-		cs, err := d.Jiku.ListComments(ctx, id)
+		cs, err := d.Jiku.ListComments(ctx, jiku.ReqRef(id))
 		for _, c := range cs {
 			if c.AuthorID != self && c.VisibilityLevel == "public" {
 				pl.CommentsToGitHub++

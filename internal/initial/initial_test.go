@@ -51,8 +51,8 @@ func (f *fakeJiku) ListRequirements(_ context.Context, p int64, filter map[strin
 	return out, nil
 }
 
-func (f *fakeJiku) ListComments(_ context.Context, id int64) ([]*jiku.Comment, error) {
-	return f.comms[id], nil
+func (f *fakeJiku) ListComments(_ context.Context, on jiku.Ref) ([]*jiku.Comment, error) {
+	return f.comms[on.ID], nil
 }
 
 func req(id int64, title, st, vis string) *jiku.Requirement {

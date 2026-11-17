@@ -86,6 +86,86 @@ func (c *Comment) AuthorName() string {
 	return "Alguien"
 }
 
+// Task is the subset of a task the connector syncs. Jiku calls the table `objectives`; the bus
+// calls them tasks.
+type Task struct {
+	ID              int64     `json:"id"`
+	Title           string    `json:"title"`
+	Description     *string   `json:"description"`
+	Priority        string    `json:"priority"`
+	State           string    `json:"state"`
+	ProjectID       int64     `json:"projectId"`
+	RequirementID   *int64    `json:"requirementId"`
+	CreatedBy       string    `json:"createdBy"`
+	VisibilityLevel string    `json:"visibilityLevel"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	// Attachments are the files linked to the task (its description's). The tasks resource does
+	// not include them: they are read from the attachments resource.
+	Attachments []Attachment `json:"-"`
+}
+
+// Public reports whether the task is public.
+func (t *Task) Public() bool { return t.VisibilityLevel == "public" }
+
+// Req returns the task's requirement, 0 when it has none.
+func (t *Task) Req() int64 {
+	if t.RequirementID == nil {
+		return 0
+	}
+	return *t.RequirementID
+}
+
+// Desc returns the description, "" for null.
+func (t *Task) Desc() string {
+	if t.Description == nil {
+		return ""
+	}
+	return *t.Description
+}
+
+// NewTask is the payload of tasks.new.
+type NewTask struct {
+	Title           string  `json:"title"`
+	Description     string  `json:"description,omitempty"`
+	ProjectID       int64   `json:"projectId"`
+	RequirementID   int64   `json:"requirementId"`
+	State           string  `json:"state,omitempty"`
+	Priority        string  `json:"priority,omitempty"`
+	VisibilityLevel string  `json:"visibilityLevel"`
+	FileIDs         []int64 `json:"fileIds,omitempty"`
+	// ResponsiblePersonIDs is required by the contract; the connector creates tasks without
+	// responsible people (it cannot tell who they are from GitHub).
+	ResponsiblePersonIDs []int64 `json:"responsiblePersonIds"`
+}
+
+// Kind of a Jiku entity that has comments.
+type Kind string
+
+// The entities the connector syncs.
+const (
+	KindRequirement Kind = "requirement"
+	KindTask        Kind = "task"
+)
+
+// Ref is a requirement or a task, for what both have: comments.
+type Ref struct {
+	Kind Kind
+	ID   int64
+}
+
+// ReqRef and TaskRef build a Ref.
+func ReqRef(id int64) Ref  { return Ref{Kind: KindRequirement, ID: id} }
+func TaskRef(id int64) Ref { return Ref{Kind: KindTask, ID: id} }
+
+// channel is the command prefix of the entity: "requirements.12" or "tasks.12".
+func (r Ref) channel() string {
+	if r.Kind == KindTask {
+		return "tasks." + strconv.FormatInt(r.ID, 10)
+	}
+	return "requirements." + strconv.FormatInt(r.ID, 10)
+}
+
 // NewRequirement is the payload of requirements.new.
 type NewRequirement struct {
 	Title           string  `json:"title"`
@@ -117,11 +197,18 @@ type API interface {
 	// EditRequirement sends requirements.{id}.edit. Never send `tags`: it is a full replacement.
 	// `fileIds`, when sent, is the full set of files linked to the requirement.
 	EditRequirement(ctx context.Context, id int64, fields map[string]any) error
-	ListComments(ctx context.Context, requirementID int64) ([]*Comment, error)
+	GetTask(ctx context.Context, id int64) (*Task, error)
+	// ListTasks lists the tasks of a project matching the extra filter (without their
+	// attachments).
+	ListTasks(ctx context.Context, projectID int64, filter map[string]any) ([]*Task, error)
+	CreateTask(ctx context.Context, in NewTask) (int64, error)
+	// EditTask sends tasks.{id}.edit. Never send `responsiblePersonIds`: it is a full replacement.
+	EditTask(ctx context.Context, id int64, fields map[string]any) error
+	ListComments(ctx context.Context, on Ref) ([]*Comment, error)
 	// CreateComment links fileIDs (files the connector uploaded) to the new comment.
-	CreateComment(ctx context.Context, requirementID int64, body, visibility string, fileIDs []int64) (int64, error)
+	CreateComment(ctx context.Context, on Ref, body, visibility string, fileIDs []int64) (int64, error)
 	// EditComment replaces the body; a non-nil fileIDs is the full set of the comment's files.
-	EditComment(ctx context.Context, requirementID, commentID int64, body string, fileIDs []int64) error
+	EditComment(ctx context.Context, on Ref, commentID int64, body string, fileIDs []int64) error
 	// DownloadFile reads a stored file.
 	DownloadFile(ctx context.Context, fileID int64) (*File, []byte, error)
 	// UploadFile stores a file as the connector's; it can then be linked with fileIds.
@@ -197,24 +284,83 @@ func (j *Client) EditRequirement(ctx context.Context, id int64, fields map[strin
 	return err
 }
 
+var taskFields = []string{"id", "title", "priority", "state", "projectId", "requirementId", "createdBy", "visibilityLevel", "createdAt", "updatedAt"}
+
+// GetTask implements API: the task and its description's files.
+func (j *Client) GetTask(ctx context.Context, id int64) (*Task, error) {
+	item, err := j.c.Get(ctx, "tasks", jikugo.Get{ID: id, Fields: taskFields, Include: []string{"description"}})
+	if err != nil {
+		if jikugo.IsCode(err, "task_not_found") {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var t Task
+	if err := item.Into(&t); err != nil {
+		return nil, err
+	}
+	if err := j.c.All(ctx, "attachments", jikugo.List{
+		Filter: jikugo.F{"entityType": "task", "entityId": id},
+		Fields: []string{"id", "fileId", "fileName", "mimeType", "fileSize"},
+	}, &t.Attachments); err != nil {
+		return nil, fmt.Errorf("jiku: the files of task %d: %w", id, err)
+	}
+	return &t, nil
+}
+
+// ListTasks implements API.
+func (j *Client) ListTasks(ctx context.Context, projectID int64, filter map[string]any) ([]*Task, error) {
+	f := jikugo.F{"projectId": projectID}
+	for k, v := range filter {
+		f[k] = v
+	}
+	var out []*Task
+	err := j.c.All(ctx, "tasks", jikugo.List{
+		Filter: f, Fields: taskFields, Include: []string{"description"}, Sort: []string{"createdAt"},
+	}, &out)
+	return out, err
+}
+
+// CreateTask implements API.
+func (j *Client) CreateTask(ctx context.Context, in NewTask) (int64, error) {
+	if in.ResponsiblePersonIDs == nil {
+		in.ResponsiblePersonIDs = []int64{}
+	}
+	data, err := j.c.Command(ctx, "tasks.new", in)
+	if err != nil {
+		return 0, err
+	}
+	return decodeID(data)
+}
+
+// EditTask implements API.
+func (j *Client) EditTask(ctx context.Context, id int64, fields map[string]any) error {
+	if _, ok := fields["responsiblePersonIds"]; ok {
+		return errors.New("jiku: the connector never edits a task's responsible people")
+	}
+	_, err := j.c.Command(ctx, "tasks."+strconv.FormatInt(id, 10)+".edit", fields)
+	return err
+}
+
 // ListComments implements API.
-func (j *Client) ListComments(ctx context.Context, requirementID int64) ([]*Comment, error) {
+func (j *Client) ListComments(ctx context.Context, on Ref) ([]*Comment, error) {
 	var out []*Comment
 	err := j.c.All(ctx, "comments", jikugo.List{
-		Filter:  jikugo.F{"entityType": "requirement", "entityId": requirementID},
+		Filter:  jikugo.F{"entityType": string(on.Kind), "entityId": on.ID},
 		Include: []string{"author"},
 		Sort:    []string{"createdAt"},
 	}, &out)
 	return out, err
 }
 
-// CreateComment implements API.
-func (j *Client) CreateComment(ctx context.Context, requirementID int64, body, visibility string, fileIDs []int64) (int64, error) {
+// CreateComment implements API. The visibility is always sent: a task's comment is internal by
+// default.
+func (j *Client) CreateComment(ctx context.Context, on Ref, body, visibility string, fileIDs []int64) (int64, error) {
 	payload := map[string]any{"comment": body, "visibilityLevel": visibility}
 	if len(fileIDs) > 0 {
 		payload["fileIds"] = fileIDs
 	}
-	data, err := j.c.Command(ctx, "requirements."+strconv.FormatInt(requirementID, 10)+".comment", payload)
+	data, err := j.c.Command(ctx, on.channel()+".comment", payload)
 	if err != nil {
 		return 0, err
 	}
@@ -222,12 +368,12 @@ func (j *Client) CreateComment(ctx context.Context, requirementID int64, body, v
 }
 
 // EditComment implements API.
-func (j *Client) EditComment(ctx context.Context, requirementID, commentID int64, body string, fileIDs []int64) error {
+func (j *Client) EditComment(ctx context.Context, on Ref, commentID int64, body string, fileIDs []int64) error {
 	payload := map[string]any{"comment": body}
 	if fileIDs != nil {
 		payload["fileIds"] = fileIDs
 	}
-	_, err := j.c.Command(ctx, fmt.Sprintf("requirements.%d.comment.%d.edit", requirementID, commentID), payload)
+	_, err := j.c.Command(ctx, fmt.Sprintf("%s.comment.%d.edit", on.channel(), commentID), payload)
 	return err
 }
 

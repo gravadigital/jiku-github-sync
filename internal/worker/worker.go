@@ -29,9 +29,11 @@ type GitHub interface {
 	ListItems(ctx context.Context, projectID string) ([]*github.Item, error)
 	GetRepo(ctx context.Context, repo string) (*github.Repo, error)
 	OrgIssueTypes(ctx context.Context, org string) ([]string, error)
+	IssueParents(ctx context.Context, repo string) ([]github.IssueParent, error)
+	ListSubIssues(ctx context.Context, repo string, number int) ([]*github.Issue, error)
 }
 
-// Events is Jiku's event stream; Run blocks, calling handle for each requirement event.
+// Events is Jiku's event stream; Run blocks, calling handle for each requirement or task event.
 type Events interface {
 	Run(ctx context.Context, handle func(Event)) error
 }
@@ -41,6 +43,7 @@ type Event struct {
 	ID           string
 	Type         string
 	ReqID        int64
+	TaskID       int64 // a task event when set
 	ProjectID    int64
 	ActorID      string
 	BecamePublic bool
@@ -74,6 +77,9 @@ type Worker struct {
 	q     *Queue
 	log   *slog.Logger
 	items sync.Map // project item id -> hash of its values
+	// parents holds each open issue's parent as last seen ("" without one): linking a sub-issue
+	// does not touch updated_at, so this is how a poll sees it.
+	parents sync.Map
 	// verifying holds the projects whose verification is running.
 	verifying sync.Map
 
@@ -166,6 +172,18 @@ func (w *Worker) startProjects(ctx context.Context) {
 		if p.InitialSyncMode() != mapping.InitialSyncOff {
 			w.enqueueBackground(Key{Kind: InitialSync, Project: p.JikuProject})
 		}
+		if p.TasksEnabled() {
+			tstarted, err := w.o.Engine.EnsureTasksStarted(ctx, p.JikuProject)
+			if err != nil {
+				w.log.Error("project state", "project", p.JikuProject, "error", err)
+				continue
+			}
+			w.log.Info("syncing tasks", "project", p.JikuProject, "since", tstarted)
+			if p.TaskInitialSyncMode() != mapping.InitialSyncOff {
+				// Queued after the requirements' initial sync: it needs their pairs.
+				w.enqueueBackground(Key{Kind: TaskInitialSync, Project: p.JikuProject})
+			}
+		}
 	}
 }
 
@@ -209,8 +227,12 @@ func (w *Worker) processLoop(ctx context.Context) {
 			err = w.o.Engine.HandleIssue(ctx, k.Repo, k.Number)
 		case IssueNode:
 			err = w.o.Engine.HandleIssueNode(ctx, k.Project, k.Node)
+		case Task:
+			err = w.o.Engine.HandleTask(ctx, k.TaskID, k.BecamePublic)
 		case InitialSync:
 			err = w.initialSync(ctx, k.Project)
+		case TaskInitialSync:
+			err = w.taskInitialSync(ctx, k.Project)
 		case Verify:
 			// Verification only reads, and reads every pair: it runs apart so the queue keeps
 			// serving changes meanwhile (one at a time per project).
@@ -319,6 +341,12 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 			}
 		}
 		commentCur[repo] = cmax
+
+		if p.TasksEnabled() {
+			if err := w.sweepParents(ctx, gh, p, repo); err != nil {
+				return err
+			}
+		}
 	}
 	// Project fields do not touch the issue's updated_at: compare each item's values instead.
 	if p.GithubProject != "" {
@@ -354,6 +382,29 @@ func (w *Worker) pollProject(ctx context.Context, p *mapping.Project) error {
 			s.CommentCursor[k] = v
 		}
 	})
+}
+
+// sweepParents queues the open issues whose parent changed since the last poll.
+func (w *Worker) sweepParents(ctx context.Context, gh GitHub, p *mapping.Project, repo string) error {
+	list, err := gh.IssueParents(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("%s: parents: %w", repo, err)
+	}
+	for _, ip := range list {
+		prev, seen := w.parents.Load(ip.NodeID)
+		if seen && prev.(string) == ip.Parent {
+			continue
+		}
+		w.parents.Store(ip.NodeID, ip.Parent)
+		k := Key{Kind: IssueNode, Node: ip.NodeID, Project: p.JikuProject}
+		switch {
+		case seen:
+			w.Enqueue(k) // its parent changed since the last poll
+		case ip.Parent != "":
+			w.enqueueBackground(k) // first sight after a start: checked once
+		}
+	}
+	return nil
 }
 
 func valuesHash(v map[string]github.FieldValue) string {
@@ -417,6 +468,13 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 			w.enqueueBackground(Key{Kind: Requirement, ReqID: r.ID, BecamePublic: older})
 			n++
 		}
+		if p.TasksEnabled() {
+			m, err := w.reconcileTasks(ctx, p, ps, linked)
+			n += m
+			if err != nil {
+				errs = append(errs, fmt.Errorf("project %d tasks: %w", p.JikuProject, err))
+			}
+		}
 	}
 	w.log.Info("reconciliation queued", "items", n)
 	if w.o.VerifyAfterReconcile {
@@ -428,6 +486,30 @@ func (w *Worker) ReconcileOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// reconcileTasks queues every task pair and every public task of a synced requirement that has no
+// pair (the engine decides whether it qualifies).
+func (w *Worker) reconcileTasks(ctx context.Context, p *mapping.Project, ps *state.ProjectState, reqLinked map[int64]bool) (int, error) {
+	n := 0
+	linked := map[int64]bool{}
+	for _, id := range ps.TaskLinks {
+		linked[id] = true
+		w.enqueueBackground(Key{Kind: Task, TaskID: id})
+		n++
+	}
+	tasks, err := w.o.Jiku.ListTasks(ctx, p.JikuProject, map[string]any{"visibilityLevel": "public"})
+	if err != nil {
+		return n, err
+	}
+	for _, t := range tasks {
+		if linked[t.ID] || t.Req() == 0 || !reqLinked[t.Req()] {
+			continue
+		}
+		w.enqueueBackground(Key{Kind: Task, TaskID: t.ID})
+		n++
+	}
+	return n, nil
+}
+
 func (w *Worker) eventsLoop(ctx context.Context) {
 	self := w.o.Jiku.SelfID()
 	backoff := 2 * time.Second
@@ -437,7 +519,14 @@ func (w *Worker) eventsLoop(ctx context.Context) {
 			if ev.ActorID == self && !ev.BecamePublic {
 				return // the connector's own writes
 			}
-			if w.o.Engine.Config().Project(ev.ProjectID) == nil {
+			p := w.o.Engine.Config().Project(ev.ProjectID)
+			if p == nil {
+				return
+			}
+			if ev.TaskID != 0 {
+				if p.TasksEnabled() {
+					w.Enqueue(Key{Kind: Task, TaskID: ev.TaskID, BecamePublic: ev.BecamePublic})
+				}
 				return
 			}
 			w.Enqueue(Key{Kind: Requirement, ReqID: ev.ReqID, BecamePublic: ev.BecamePublic})
@@ -493,5 +582,6 @@ func (w *Worker) reloadLoop(ctx context.Context) {
 		w.log.Info("mapping reloaded", "projects", len(f.Projects))
 		w.startProjects(ctx)
 		w.items.Range(func(k, _ any) bool { w.items.Delete(k); return true })
+		w.parents.Range(func(k, _ any) bool { w.parents.Delete(k); return true })
 	}
 }

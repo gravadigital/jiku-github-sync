@@ -19,9 +19,9 @@ import (
 //
 // The mirrors are recognisable on their own (a marker on GitHub, the attribution link in Jiku),
 // so a crash between writing a mirror and saving the link does not produce a duplicate.
-func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.Link, req *jiku.Requirement, is *github.Issue, opts SyncOptions) error {
+func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.Link, on jiku.Ref, is *github.Issue, opts SyncOptions) error {
 	log := e.logPair(l)
-	jcs, err := e.jk.ListComments(ctx, req.ID)
+	jcs, err := e.jk.ListComments(ctx, on)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 			}
 			add(state.CommentLink{JikuID: j.ID, GHID: gc.ID, Origin: "jiku", SourceHash: text.Hash(j.Body)})
 			log.Info("comment mirrored to github", "jikuComment", j.ID, "githubComment", gc.ID)
-			if err := e.st.SaveLink(ctx, l); err != nil {
+			if err := e.st.Save(ctx, l); err != nil {
 				return err
 			}
 		case en.g != nil:
@@ -165,7 +165,7 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 					if len(files) > 0 {
 						fileIDs = append(jiku.FileIDs(linked), files...)
 					}
-					if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, text.JikuComment(g.Author, g.HTMLURL, content, date), fileIDs); err != nil {
+					if err := e.jk.EditComment(ctx, on, cl.JikuID, text.JikuComment(g.Author, g.HTMLURL, content, date), fileIDs); err != nil {
 						return err
 					}
 					cl.SourceHash = text.Hash(g.Body)
@@ -177,13 +177,13 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 			if err != nil {
 				return err
 			}
-			jid, err := e.jk.CreateComment(ctx, req.ID, text.JikuComment(g.Author, g.HTMLURL, content, date), "public", files)
+			jid, err := e.jk.CreateComment(ctx, on, text.JikuComment(g.Author, g.HTMLURL, content, date), "public", files)
 			if err != nil {
 				return err
 			}
 			add(state.CommentLink{JikuID: jid, GHID: g.ID, Origin: "github", SourceHash: text.Hash(g.Body)})
 			log.Info("comment mirrored to jiku", "githubComment", g.ID, "jikuComment", jid)
-			if err := e.st.SaveLink(ctx, l); err != nil {
+			if err := e.st.Save(ctx, l); err != nil {
 				return err
 			}
 		}
@@ -202,7 +202,7 @@ func (e *Engine) syncComments(ctx context.Context, p *mapping.Project, l *state.
 		if jc := jByID[cl.JikuID]; jc != nil {
 			login, url = attribution(jc.Body, is.HTMLURL)
 		}
-		if err := e.jk.EditComment(ctx, req.ID, cl.JikuID, text.DeletedComment(login, url), nil); err != nil {
+		if err := e.jk.EditComment(ctx, on, cl.JikuID, text.DeletedComment(login, url), nil); err != nil {
 			return err
 		}
 		cl.Deleted = true

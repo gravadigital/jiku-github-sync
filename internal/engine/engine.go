@@ -42,6 +42,10 @@ type GitHub interface {
 	SetSelect(ctx context.Context, projectID, itemID, fieldID, optionID string) error
 	ClearField(ctx context.Context, projectID, itemID, fieldID string) error
 	LastStatusChange(ctx context.Context, issueNodeID, projectID string) (*github.StatusChange, error)
+	// Sub-issues (tasks).
+	AddSubIssue(ctx context.Context, parentRepo string, parentNumber int, subID int64, replace bool) error
+	RemoveSubIssue(ctx context.Context, parentRepo string, parentNumber int, subID int64) error
+	LastParentChange(ctx context.Context, issueNodeID string) (*github.ParentChange, error)
 	// Attachments.
 	UploadAsset(ctx context.Context, repo, name, contentType string, data []byte) (string, error)
 	Download(ctx context.Context, url string) ([]byte, string, error)
@@ -222,7 +226,9 @@ func (e *Engine) HandleIssue(ctx context.Context, repo string, number int) error
 // HandleIssueNode is HandleIssue by node id, for an item of the given Jiku project's GitHub
 // Project (Project item polls and webhooks carry only the node id).
 func (e *Engine) HandleIssueNode(ctx context.Context, jikuProject int64, nodeID string) error {
-	if l, err := e.st.LinkByIssue(ctx, nodeID); err == nil {
+	if l, err := e.linkOfNode(ctx, nodeID); err != nil {
+		return err
+	} else if l != nil {
 		return e.SyncLink(ctx, l, SyncOptions{})
 	}
 	p := e.Config().Project(jikuProject)
@@ -243,16 +249,22 @@ func (e *Engine) handleIssue(ctx context.Context, is *github.Issue) error {
 	if is.IsPR {
 		return nil
 	}
-	l, err := e.st.LinkByIssue(ctx, is.NodeID)
-	switch {
-	case err == nil:
-		return e.SyncLink(ctx, l, SyncOptions{})
-	case !errors.Is(err, state.ErrNotFound):
+	l, err := e.linkOfNode(ctx, is.NodeID)
+	if err != nil {
 		return err
+	}
+	if l != nil {
+		return e.SyncLink(ctx, l, SyncOptions{})
 	}
 	p := e.Config().ProjectForRepo(is.Repo)
 	if p == nil {
 		return nil
+	}
+	if p.TasksEnabled() {
+		done, err := e.handleSubIssue(ctx, p, is)
+		if done || err != nil {
+			return err
+		}
 	}
 	started, err := e.EnsureStarted(ctx, p.JikuProject)
 	if err != nil {
@@ -263,6 +275,36 @@ func (e *Engine) handleIssue(ctx context.Context, is *github.Issue) error {
 	}
 	_, err = e.ImportIssue(ctx, p, is, SyncOptions{})
 	return err
+}
+
+// handleSubIssue deals with an issue with no pair that is a sub-issue: of a synced requirement's
+// issue it becomes a task (when it qualifies); of a task's sub-issue it is ignored (Jiku has no
+// subtasks). done is false when it is none of those, and it goes on as any issue.
+func (e *Engine) handleSubIssue(ctx context.Context, p *mapping.Project, is *github.Issue) (bool, error) {
+	if !is.HasParent() {
+		return false, nil
+	}
+	_, parent, err := e.parentOf(ctx, p, is, nil)
+	if err != nil {
+		return true, err
+	}
+	switch {
+	case parent == nil || parent.JikuProject != p.JikuProject:
+		return false, nil
+	case parent.IsTask():
+		return true, nil
+	case parent.Unlinked:
+		return false, nil
+	}
+	started, err := e.EnsureTasksStarted(ctx, p.JikuProject)
+	if err != nil {
+		return true, err
+	}
+	if is.CreatedAt.Before(started) || !is.Open() {
+		return true, nil // pre-existing: the tasks' initial sync's job
+	}
+	_, err = e.ImportSubIssue(ctx, p, is, parent, SyncOptions{})
+	return true, err
 }
 
 // SyncOptions tunes a sync.

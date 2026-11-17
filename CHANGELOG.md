@@ -29,6 +29,70 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 
+### Added
+
+- **Tasks ↔ sub-issues (opt-in per project, `tasks.enabled`).** A public task of a synced requirement
+  becomes a sub-issue of the requirement's issue, in the same repository; a new sub-issue of a synced
+  issue becomes a public task of its requirement (state `backlog`, no responsible people). Title,
+  description, state, priority (when the sub-issue is on the Project), comments and attachments are
+  synced as for requirements, the latest change winning field by field. `finalizado` / `cancelado`
+  close the sub-issue as completed / not planned; reopening goes back to the last open state.
+- **Hierarchy both ways.** Moving a task to another synced requirement moves its sub-issue under that
+  requirement's issue, and moving a sub-issue under another synced issue moves the task; when both
+  moved, the latest change wins (GitHub's timeline says when the parent changed).
+- **What stays out, and how pairs stop syncing.** Tasks without a requirement, internal tasks and
+  tasks of a requirement that is not synced never leave Jiku; sub-issues of sub-issues are ignored
+  (Jiku has no subtasks). A task that becomes internal, or leaves the synced requirements, stops
+  syncing with a note on the sub-issue (moved to an unsynced requirement, the sub-issue is also
+  taken out of its parent). A sub-issue detached on GitHub, or moved under an issue that is not
+  synced, stops syncing with an internal note on the task, which stays where it is in Jiku; each
+  pair is revived only by the side that unlinked it. A requirement that stops syncing takes its
+  tasks with it, and brings them back when it is revived; a requirement that starts syncing brings
+  its public tasks.
+- **An issue already synced as a requirement that becomes a sub-issue stays a requirement** (Jiku
+  cannot turn one into a task): an internal note is left on it once.
+- **Tasks' initial sync** (`tasks.initialSync`: `plan` by default, `apply`, `off`): once tasks are
+  turned on, the open public tasks of synced requirements and the open sub-issues of their issues
+  are linked (same title, unique under that requirement, or the connector's marker) or created on
+  the other side. It runs inside `serve`, after the requirements' initial sync, and is logged one
+  line per item like the requirements' plan.
+- **`taskStatus` in a field preset**: the Status mapping for tasks' states (`backlog`, `activo`,
+  `en_revision`, `finalizado`, `cancelado`). Without it the sub-issues are not added to the Project
+  and only open/closed is synced. `tasks.issueType` sets the issue type of the sub-issues created
+  from tasks. `check-config` and the mapping check validate `taskStatus` against the Project.
+- **Parents sweep.** Linking or unlinking a sub-issue does not change either issue's `updated_at`, so
+  the poller reads the parents of each repo's open issues (one GraphQL query per 100 issues, only for
+  projects with tasks) and syncs the ones whose parent changed. The webhook receiver takes the
+  `sub_issues` event.
+- **Verification** compares task pairs too (fields, state, column, parent, comments) and lists open
+  public tasks of synced requirements without a sub-issue and open sub-issues of synced issues
+  without a task.
+
+### Changed
+
+- The Jiku event consumer subscribes to every event type and keeps requirement and task events
+  (task events only for projects with tasks turned on), so turning tasks on by reloading the mapping
+  needs no restart.
+
+### Notes for existing installations
+
+- **Nothing changes until a project turns tasks on.** Without a `tasks` section the connector syncs
+  exactly as before (a new sub-issue is still imported as a requirement), and the state written by
+  1.0.0 is read as it is: no migration.
+- **To turn tasks on**, add a `taskStatus` to the project's field preset (optional) and
+  `tasks: { enabled: true }` to the project. The tasks' initial sync starts in `plan`: read the plan in
+  the logs (`tasks initial sync plan`), then set `tasks.initialSync: apply`. New tasks and sub-issues
+  are synced from the moment tasks are turned on, whatever the mode.
+- **Sub-issues created while running 1.0.0 were imported as requirements**, and stay requirements
+  (each gets an internal note when tasks are turned on; the plan lists them as skipped).
+- **GitHub permissions:** none new. Sub-issues are written with the same Issues read/write
+  permission (`repo` scope for a token).
+- **Jiku permissions:** none new. The `internal-app` role already allows `tasks.new`,
+  `tasks.{id}.edit`, `tasks.{id}.comment` and the tasks and attachments queries. Comments copied to a
+  task notify nobody (Jiku has no task subscriptions).
+- **State in the KV**: new keys `link.t.*`, `link.ti.*`, `pending.t.*`, `pending.ti.*` and new
+  optional fields in `project.*` and in links. Existing keys keep their shape.
+
 ## [1.0.0] - 2026-11-12
 
 First release: a service that keeps the requirements of Jiku projects and the issues of GitHub

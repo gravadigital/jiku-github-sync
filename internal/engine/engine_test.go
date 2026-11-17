@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gravadigital/jiku-github-sync/internal/github"
+	"github.com/gravadigital/jiku-github-sync/internal/jiku"
 	"github.com/gravadigital/jiku-github-sync/internal/mapping"
 	"github.com/gravadigital/jiku-github-sync/internal/state"
 	"github.com/gravadigital/jiku-github-sync/internal/text"
@@ -476,7 +477,7 @@ func TestCommentsBothWays(t *testing.T) {
 	if !strings.Contains(all, "**Ana Pérez** comentó en Jiku:\n\ncomentario público") || strings.Contains(all, "interno") {
 		t.Fatalf("only public Jiku comments go to GitHub:\n%s", all)
 	}
-	jcs, _ := h.jk.ListComments(h.ctx, r.ID)
+	jcs, _ := h.jk.ListComments(h.ctx, jiku.ReqRef(r.ID))
 	var mirror int64
 	for _, c := range jcs {
 		if strings.Contains(c.Body, "respuesta del cliente") {
@@ -500,7 +501,7 @@ func TestCommentsBothWays(t *testing.T) {
 		}
 	}
 	h.syncReq(r.ID)
-	jcs, _ = h.jk.ListComments(h.ctx, r.ID)
+	jcs, _ = h.jk.ListComments(h.ctx, jiku.ReqRef(r.ID))
 	if !slices.ContainsFunc(jcs, func(c *jikuComment) bool { return c.ID == mirror && strings.HasSuffix(c.Body, "respuesta editada") }) {
 		t.Fatal("GitHub edit must reach the Jiku mirror")
 	}
@@ -513,7 +514,7 @@ func TestCommentsBothWays(t *testing.T) {
 	// Deleted on GitHub.
 	h.gh.deleteComment(is.NodeID, gc.ID)
 	h.syncReq(r.ID)
-	jcs, _ = h.jk.ListComments(h.ctx, r.ID)
+	jcs, _ = h.jk.ListComments(h.ctx, jiku.ReqRef(r.ID))
 	if !slices.ContainsFunc(jcs, func(c *jikuComment) bool {
 		return c.ID == mirror && strings.Contains(c.Body, "comentario eliminado en GitHub") && strings.Contains(c.Body, "@client")
 	}) {

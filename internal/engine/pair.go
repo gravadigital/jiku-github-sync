@@ -44,7 +44,73 @@ func decide(jChanged, gChanged, differ bool, jAt, gAt time.Time) side {
 	}
 }
 
-func terminal(state string) bool { return state == "resuelto" || state == "cancelado" }
+// model is what differs between a requirement's and a task's states: their names and the Status
+// mapping they use. Everything else about a pair is synced the same way.
+type model struct {
+	task bool
+	// status is the Status mapping (nil: only open/closed is synced).
+	status *mapping.StatusMapping
+	// done and cancelled are the closing states; reopen the default open state.
+	done, cancelled, reopen string
+}
+
+func (e *Engine) model(p *mapping.Project, task bool) model {
+	if task {
+		return model{task: true, status: p.TaskStatus(), done: "finalizado", cancelled: "cancelado", reopen: "backlog"}
+	}
+	m := model{done: "resuelto", cancelled: "cancelado", reopen: "analisis"}
+	if p.Fields != nil {
+		m.status = p.Fields.Status
+	}
+	return m
+}
+
+func (m model) terminal(state string) bool { return state == m.done || state == m.cancelled }
+
+// closedAs is the state a closed issue means.
+func (m model) closedAs(reason string) string {
+	if reasonClass(reason) == "not_planned" {
+		return m.cancelled
+	}
+	return m.done
+}
+
+// jikuSide is the Jiku half of a pair, requirement or task, in the terms the engine compares.
+type jikuSide struct {
+	ref         jiku.Ref
+	title, desc string
+	state       string
+	priority    string
+	typ         string // requirements only
+	updatedAt   time.Time
+	attachments []jiku.Attachment
+}
+
+func reqSide(r *jiku.Requirement) *jikuSide {
+	return &jikuSide{ref: jiku.ReqRef(r.ID), title: r.Title, desc: r.Description, state: r.State,
+		priority: r.Priority, typ: r.TypeOrEmpty(), updatedAt: r.UpdatedAt, attachments: r.Attachments}
+}
+
+func taskSide(t *jiku.Task) *jikuSide {
+	return &jikuSide{ref: jiku.TaskRef(t.ID), title: t.Title, desc: t.Desc(), state: t.State,
+		priority: t.Priority, updatedAt: t.UpdatedAt, attachments: t.Attachments}
+}
+
+// editJiku writes fields to the requirement or task.
+func (e *Engine) editJiku(ctx context.Context, ref jiku.Ref, fields map[string]any) error {
+	if ref.Kind == jiku.KindTask {
+		return e.jk.EditTask(ctx, ref.ID, fields)
+	}
+	return e.jk.EditRequirement(ctx, ref.ID, fields)
+}
+
+// issueBody is the body the connector writes on the pair's issue: the text and its marker.
+func issueBody(l *state.Link, body string) string {
+	if l.IsTask() {
+		return text.SubIssueBody(body, l.TaskID)
+	}
+	return text.IssueBody(body, l.ReqID)
+}
 
 func reasonClass(r string) string {
 	if r == "not_planned" || r == "duplicate" {
@@ -69,10 +135,10 @@ type ghView struct {
 	typeView string
 }
 
-func (e *Engine) view(ctx context.Context, p *mapping.Project, is *github.Issue, item *github.Item, last state.Snapshot, log *slog.Logger) *ghView {
+func (e *Engine) view(ctx context.Context, p *mapping.Project, m model, is *github.Issue, item *github.Item, last state.Snapshot, log *slog.Logger) *ghView {
 	v := &ghView{issue: is, item: item}
 	if item != nil && p.Fields != nil {
-		if s := p.Fields.Status; s != nil {
+		if s := m.status; s != nil {
 			fv := item.Values[s.Field]
 			v.status, v.statusAt = fv.Option, fv.UpdatedAt
 			// Who moved the card is only in the issue's timeline: read it when the card moved.
@@ -94,7 +160,9 @@ func (e *Engine) view(ctx context.Context, p *mapping.Project, is *github.Issue,
 			v.priority, v.priorityAt = fv.Option, fv.UpdatedAt
 		}
 	}
-	v.typeView, _ = p.TypeFromGithub(is.IssueType, is.Labels)
+	if !m.task {
+		v.typeView, _ = p.TypeFromGithub(is.IssueType, is.Labels)
+	}
 	return v
 }
 
@@ -123,8 +191,9 @@ func (e *Engine) fetchIssue(ctx context.Context, p *mapping.Project, l *state.Li
 }
 
 // ensureItem returns the issue's item in the mapped Project, adding it when it is not there.
-func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Link, is *github.Issue, log *slog.Logger) (*github.Item, error) {
-	if p.GithubProject == "" {
+func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, m model, l *state.Link, is *github.Issue, log *slog.Logger) (*github.Item, error) {
+	// A task's sub-issue goes to the Project only when its states are mapped (taskStatus).
+	if p.GithubProject == "" || (m.task && m.status == nil) {
 		return nil, nil
 	}
 	item, err := e.gh(p).ItemForIssue(ctx, is.NodeID, p.GithubProject)
@@ -148,7 +217,7 @@ func (e *Engine) ensureItem(ctx context.Context, p *mapping.Project, l *state.Li
 		if err != nil {
 			return nil, err
 		}
-		settled := item != nil && (p.Fields == nil || p.Fields.Status == nil || item.Values[p.Fields.Status.Field].Option != "")
+		settled := item != nil && (m.status == nil || item.Values[m.status.Field].Option != "")
 		if settled || !e.now().Before(deadline) || e.ItemSettle <= 0 {
 			break
 		}
@@ -205,18 +274,15 @@ type ghTarget struct {
 	closeIssue bool
 }
 
-func (e *Engine) target(p *mapping.Project, v *ghView, last state.Snapshot) ghTarget {
+func (e *Engine) target(m model, v *ghView, last state.Snapshot) ghTarget {
 	is := v.issue
 	reopened := is.Open() && !last.GHOpen && last.JikuState != ""
 	reopenState := last.LastOpenState
 	if reopenState == "" {
-		reopenState = "analisis"
+		reopenState = m.reopen
 	}
 	if !is.Open() {
-		if reasonClass(is.StateReason) == "not_planned" {
-			return ghTarget{state: "cancelado", known: true}
-		}
-		return ghTarget{state: "resuelto", known: true}
+		return ghTarget{state: m.closedAs(is.StateReason), known: true}
 	}
 	if v.status == "" {
 		if reopened {
@@ -224,14 +290,14 @@ func (e *Engine) target(p *mapping.Project, v *ghView, last state.Snapshot) ghTa
 		}
 		return ghTarget{}
 	}
-	t, ok := p.StateFromOption(v.status)
+	t, ok := m.status.Target(v.status)
 	if !ok {
 		if reopened {
 			return ghTarget{state: reopenState, known: true}
 		}
 		return ghTarget{unmapped: v.status}
 	}
-	if terminal(t.State) {
+	if m.terminal(t.State) {
 		if reopened {
 			return ghTarget{state: reopenState, known: true}
 		}
@@ -242,6 +308,9 @@ func (e *Engine) target(p *mapping.Project, v *ghView, last state.Snapshot) ghTa
 
 // SyncLink syncs one pair, field by field, then its comments.
 func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) error {
+	if l.IsTask() {
+		return e.syncTask(ctx, l, opts)
+	}
 	log := e.logPair(l)
 	p := e.Config().Project(l.JikuProject)
 	if p == nil {
@@ -276,21 +345,59 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		}
 		l.Unlinked = true
 		log.Info("requirement became internal: pair unlinked")
-		return e.st.SaveLink(ctx, l)
+		if err := e.st.SaveLink(ctx, l); err != nil {
+			return err
+		}
+		return e.followRequirement(ctx, p, l)
 	}
+	revived := false
 	if l.Unlinked {
 		log.Info("requirement is public again: pair revived")
 		l.Unlinked = false
+		revived = true
 		// Jiku wins every field on revival: GitHub's side is taken as "unchanged".
 		l.Last = state.Snapshot{Title: is.Title, GHOpen: is.Open(), GHStateReason: is.StateReason}
 		l.Last.Bodies("", text.Hash(is.Body))
 	}
+	e.noteSubIssue(ctx, p, l, is, log)
 
-	item, err := e.ensureItem(ctx, p, l, is, log)
+	if err := e.syncFields(ctx, p, e.model(p, false), l, reqSide(req), is, opts, log); err != nil {
+		return err
+	}
+	if revived {
+		return e.followRequirement(ctx, p, l)
+	}
+	return nil
+}
+
+// noteSubIssue leaves, once, an internal note on a requirement whose issue is a sub-issue of
+// another synced issue: Jiku cannot turn a requirement into a task, so it stays a requirement.
+func (e *Engine) noteSubIssue(ctx context.Context, p *mapping.Project, l *state.Link, is *github.Issue, log *slog.Logger) {
+	if !p.TasksEnabled() || !is.HasParent() || l.SubIssueNoted {
+		return
+	}
+	parent, err := e.linkOfIssue(ctx, p, is.ParentRepo, is.ParentNumber)
+	if err != nil || parent == nil || parent.IsTask() || parent.Unlinked {
+		return
+	}
+	msg := fmt.Sprintf("En GitHub, %s pasó a ser sub-issue de %s (el requisito %d). Sigue sincronizándose como requisito: "+
+		"Jiku no convierte un requisito en tarea.", is.HTMLURL, parent.IssueKey(), parent.ReqID)
+	if _, err := e.jk.CreateComment(ctx, jiku.ReqRef(l.ReqID), msg, "internal", nil); err != nil {
+		log.Warn("could not leave an internal comment", "error", err)
+		return
+	}
+	l.SubIssueNoted = true
+	log.Warn("the issue of a requirement is a sub-issue of another synced issue: it stays a requirement", "parent", parent.IssueKey())
+}
+
+// syncFields syncs title, description, type, priority and state of a pair, then its comments,
+// and stores the pair.
+func (e *Engine) syncFields(ctx context.Context, p *mapping.Project, m model, l *state.Link, js *jikuSide, is *github.Issue, opts SyncOptions, log *slog.Logger) error {
+	item, err := e.ensureItem(ctx, p, m, l, is, log)
 	if err != nil {
 		return err
 	}
-	v := e.view(ctx, p, is, item, l.Last, log)
+	v := e.view(ctx, p, m, is, item, l.Last, log)
 	last := l.Last
 	next := last
 	issueUpd := github.IssueInput{}
@@ -300,70 +407,73 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	var fieldWrites []func() error
 
 	// Title.
-	switch decide(req.Title != last.Title, is.Title != last.Title, req.Title != is.Title, req.UpdatedAt, is.UpdatedAt) {
+	switch decide(js.title != last.Title, is.Title != last.Title, js.title != is.Title, js.updatedAt, is.UpdatedAt) {
 	case sideJiku:
-		issueUpd.Title, issueChanged = strp(req.Title), true
+		issueUpd.Title, issueChanged = strp(js.title), true
 	case sideGitHub:
 		jikuUpd["title"] = is.Title
 	}
 	// Description. Each side holds its own form of the attachments, so each side is compared with
 	// its own snapshot; when neither moved they are taken as equal.
-	jh, gh := text.Hash(req.Description), text.Hash(is.Body)
+	jh, gh := text.Hash(js.desc), text.Hash(is.Body)
 	jBodyChanged, gBodyChanged := jh != last.JikuBody(), gh != last.GHBody()
 	next.Bodies(jh, gh)
-	switch decide(jBodyChanged, gBodyChanged, jBodyChanged || gBodyChanged, req.UpdatedAt, is.UpdatedAt) {
+	switch decide(jBodyChanged, gBodyChanged, jBodyChanged || gBodyChanged, js.updatedAt, is.UpdatedAt) {
 	case sideJiku:
-		body, err := e.toGitHub(ctx, p, l, is.Repo, req.Description, req.Attachments, false)
+		body, err := e.toGitHub(ctx, p, l, is.Repo, js.desc, js.attachments, false)
 		if err != nil {
 			return err
 		}
-		full := text.IssueBody(body, req.ID)
+		full := issueBody(l, body)
 		issueUpd.Body, issueChanged = &full, true
 		next.Bodies(jh, text.Hash(full))
 	case sideGitHub:
-		desc, files, err := e.toJiku(ctx, p, l, is.Body, func() (string, error) { return e.gh(p).IssueHTML(ctx, is.Repo, is.Number) }, req.Attachments)
+		desc, files, err := e.toJiku(ctx, p, l, is.Body, func() (string, error) { return e.gh(p).IssueHTML(ctx, is.Repo, is.Number) }, js.attachments)
 		if err != nil {
 			return err
 		}
 		desc = text.Normalize(desc)
 		jikuUpd["description"] = desc
 		if len(files) > 0 {
-			// The full set: what the requirement had, plus the new files.
-			jikuUpd["fileIds"] = append(jiku.FileIDs(req.Attachments), files...)
+			// The full set: what the requirement or task had, plus the new files.
+			jikuUpd["fileIds"] = append(jiku.FileIDs(js.attachments), files...)
 		}
 		next.Bodies(text.Hash(desc), gh)
 	}
 
-	// Type: the issue type is written apart, because orgs without issue types refuse it.
-	jt := req.TypeOrEmpty()
+	// Type (requirements only): the issue type is written apart, because orgs without issue types
+	// refuse it.
+	jt := js.typ
 	var typeWrite *string
-	// A GitHub side with nothing mapped only differs when Jiku's type just changed: otherwise an
-	// org without issue types would be written to on every sync.
-	typeDiffer := v.typeView != jt && (v.typeView != "" || jt != last.JikuType)
-	switch decide(jt != last.JikuType, v.typeView != last.GHType && v.typeView != "", typeDiffer, req.UpdatedAt, is.UpdatedAt) {
-	case sideJiku:
-		if name, set := p.IssueTypeForJiku(jt); set && name != is.IssueType {
-			typeWrite = &name
-		}
-	case sideGitHub:
-		if v.typeView != "" {
-			jikuUpd["type"] = v.typeView
-			jt = v.typeView
+	if !m.task {
+		// A GitHub side with nothing mapped only differs when Jiku's type just changed: otherwise an
+		// org without issue types would be written to on every sync.
+		typeDiffer := v.typeView != jt && (v.typeView != "" || jt != last.JikuType)
+		switch decide(jt != last.JikuType, v.typeView != last.GHType && v.typeView != "", typeDiffer, js.updatedAt, is.UpdatedAt) {
+		case sideJiku:
+			if name, set := p.IssueTypeForJiku(jt); set && name != is.IssueType {
+				typeWrite = &name
+			}
+		case sideGitHub:
+			if v.typeView != "" {
+				jikuUpd["type"] = v.typeView
+				jt = v.typeView
+			}
 		}
 	}
 
 	// Priority (a Project field).
-	finalPriority := req.Priority
+	finalPriority := js.priority
 	finalPriorityOpt := v.priority
 	if p.Fields != nil && p.Fields.Priority != nil && item != nil {
 		gp, gok := p.PriorityFromOption(v.priority)
-		jChanged := req.Priority != last.JikuPriority
+		jChanged := js.priority != last.JikuPriority
 		// An empty Jiku side in the snapshot means the issue was just created from Jiku: Jiku is the
 		// origin and wins, whatever the Project's workflows did to the new item meanwhile.
 		gPriChanged := v.priority != last.GHPriority && gok && last.JikuPriority != ""
-		switch decide(jChanged, gPriChanged, (gok && gp != req.Priority) || (!gok && jChanged), req.UpdatedAt, v.priorityAt) {
+		switch decide(jChanged, gPriChanged, (gok && gp != js.priority) || (!gok && jChanged), js.updatedAt, v.priorityAt) {
 		case sideJiku:
-			if opt, ok := p.OptionForPriority(req.Priority); ok && opt != v.priority {
+			if opt, ok := p.OptionForPriority(js.priority); ok && opt != v.priority {
 				field := p.Fields.Priority.Field
 				fieldWrites = append(fieldWrites, func() error { return e.setField(ctx, p, item, field, opt) })
 				finalPriorityOpt = opt
@@ -375,40 +485,44 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	}
 
 	// State: open/closed on the issue, the open stages on the Project's Status.
-	tg := e.target(p, v, last)
+	tg := e.target(m, v, last)
 	openChanged := is.Open() != last.GHOpen || (!is.Open() && reasonClass(is.StateReason) != reasonClass(last.GHStateReason))
 	statusByPerson := v.status != last.GHStatus && v.statusBy != AutomationLogin
 	gChanged := openChanged || statusByPerson
-	jChanged := req.State != last.JikuState
+	jChanged := js.state != last.JikuState
 	gAt := v.statusAt
 	if openChanged && is.UpdatedAt.After(gAt) {
 		gAt = is.UpdatedAt
 	}
-	finalState := req.State
+	finalState := js.state
 	finalOpen, finalReason, finalStatus := is.Open(), is.StateReason, v.status
 	if tg.unmapped != "" && statusByPerson {
+		who := "El requisito sigue"
+		if m.task {
+			who = "La tarea sigue"
+		}
 		notices = append(notices, fmt.Sprintf(
-			"La columna «%s» de GitHub no tiene un estado de Jiku configurado (movido por @%s). El requisito sigue en «%s».",
-			tg.unmapped, v.statusBy, req.State))
+			"La columna «%s» de GitHub no tiene un estado de Jiku configurado (movido por @%s). %s en «%s».",
+			tg.unmapped, v.statusBy, who, js.state))
 	}
 	// A card with no column on an open issue says nothing (e.g. the Project's options were
 	// replaced and every value was wiped): it is put back where Jiku's state says.
-	_, jikuHasOption := p.OptionForState(req.State)
+	_, jikuHasOption := m.status.Option(js.state)
 	emptyCard := item != nil && is.Open() && v.status == "" && jikuHasOption
-	differ := (tg.known && tg.state != req.State) || (!tg.known && jChanged) || emptyCard
+	differ := (tg.known && tg.state != js.state) || (!tg.known && jChanged) || emptyCard
 	if last.JikuState == "" {
 		gChanged = false // just exported: Jiku is the origin (see priority above)
 	}
-	switch decide(jChanged, gChanged && tg.known, differ, req.UpdatedAt, gAt) {
+	switch decide(jChanged, gChanged && tg.known, differ, js.updatedAt, gAt) {
 	case sideJiku:
-		wantOpen := !terminal(req.State)
+		wantOpen := !m.terminal(js.state)
 		switch {
 		case wantOpen && !is.Open():
 			issueUpd.State, issueChanged = strp("open"), true
 			finalOpen, finalReason = true, "reopened"
 		case !wantOpen:
 			want := "completed"
-			if req.State == "cancelado" {
+			if js.state == m.cancelled {
 				want = "not_planned"
 			}
 			if is.Open() || reasonClass(is.StateReason) != want {
@@ -416,15 +530,15 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 				finalOpen, finalReason = false, want
 			}
 		}
-		if opt, set := p.OptionForState(req.State); set && item != nil && opt != v.status {
-			field := p.Fields.Status.Field
+		if opt, set := m.status.Option(js.state); set && item != nil && opt != v.status {
+			field := m.status.Field
 			fieldWrites = append(fieldWrites, func() error { return e.setField(ctx, p, item, field, opt) })
 			finalStatus = opt
 		}
 	case sideGitHub:
 		jikuUpd["state"] = tg.state
 		finalState = tg.state
-		if tg.state == "resuelto" && jt == "incidencia" {
+		if !m.task && tg.state == "resuelto" && jt == "incidencia" {
 			who := is.ClosedBy
 			if who == "" {
 				who = v.statusBy
@@ -436,16 +550,16 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 			notices = append(notices, text.Expand(tg.comment, v.statusBy, v.status))
 		}
 		// The card may not say the same (a reopened issue still sitting in Done): align it.
-		if cur, ok := p.StateFromOption(v.status); item != nil && (!ok || cur.State != tg.state) && !terminal(tg.state) {
-			if opt, set := p.OptionForState(tg.state); set && opt != v.status {
-				field := p.Fields.Status.Field
+		if cur, ok := m.status.Target(v.status); item != nil && (!ok || cur.State != tg.state) && !m.terminal(tg.state) {
+			if opt, set := m.status.Option(tg.state); set && opt != v.status {
+				field := m.status.Field
 				fieldWrites = append(fieldWrites, func() error { return e.setField(ctx, p, item, field, opt) })
 				finalStatus = opt
 			}
 		}
 		if tg.closeIssue && is.Open() {
 			want := "completed"
-			if tg.state == "cancelado" {
+			if tg.state == m.cancelled {
 				want = "not_planned"
 			}
 			issueUpd.State, issueUpd.StateReason, issueChanged = strp("closed"), strp(want), true
@@ -455,8 +569,8 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 
 	// Writes: Jiku first (its validation can refuse), then GitHub.
 	if len(jikuUpd) > 0 {
-		if err := e.jk.EditRequirement(ctx, req.ID, jikuUpd); err != nil {
-			return fmt.Errorf("editing requirement %d: %w", req.ID, err)
+		if err := e.editJiku(ctx, js.ref, jikuUpd); err != nil {
+			return fmt.Errorf("editing %s %d: %w", js.ref.Kind, js.ref.ID, err)
 		}
 		log.Info("jiku updated from github", "fields", keys(jikuUpd))
 	}
@@ -484,7 +598,7 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 		log.Info("project fields updated from jiku", "status", finalStatus, "priority", finalPriorityOpt)
 	}
 	for _, n := range notices {
-		if _, err := e.jk.CreateComment(ctx, req.ID, n, "internal", nil); err != nil {
+		if _, err := e.jk.CreateComment(ctx, js.ref, n, "internal", nil); err != nil {
 			log.Warn("could not leave an internal comment", "error", err)
 		}
 	}
@@ -493,23 +607,23 @@ func (e *Engine) SyncLink(ctx context.Context, l *state.Link, opts SyncOptions) 
 	if t, ok := jikuUpd["title"].(string); ok {
 		next.Title = t
 	} else {
-		next.Title = req.Title
+		next.Title = js.title
 	}
 	next.JikuType, next.GHType = jt, ghTypeAfter
 	next.JikuPriority, next.GHPriority = finalPriority, finalPriorityOpt
 	next.JikuState = finalState
 	next.GHOpen, next.GHStateReason, next.GHStatus = finalOpen, finalReason, finalStatus
-	if !terminal(finalState) {
+	if !m.terminal(finalState) {
 		next.LastOpenState = finalState
 	}
 	l.Last = next
 
-	if err := e.syncComments(ctx, p, l, req, is, opts); err != nil {
+	if err := e.syncComments(ctx, p, l, js.ref, is, opts); err != nil {
 		// The fields are synced: keep that progress before reporting the comments' failure.
-		_ = e.st.SaveLink(ctx, l)
+		_ = e.st.Save(ctx, l)
 		return err
 	}
-	return e.st.SaveLink(ctx, l)
+	return e.st.Save(ctx, l)
 }
 
 func keys(m map[string]any) []string {

@@ -1,8 +1,9 @@
 # jiku-github-sync
 
 Jiku connector for GitHub: it keeps the requirements of a Jiku project in sync with the issues of
-its GitHub repos and with a GitHub Project (v2). Creation, title, description, state, priority,
-type and comments travel both ways.
+its GitHub repos and with a GitHub Project (v2), and, optionally, the requirements' tasks with
+the issues' sub-issues. Creation, title, description, state, priority, type and comments travel
+both ways.
 
 It is an **external** connector: Jiku works the same without it and needs no change to include
 it. All the mapping and sync state live in the connector's configuration and in its own space of
@@ -28,6 +29,11 @@ properties).
 | R8 | Comment edits follow their source; a comment deleted on GitHub is marked as deleted in Jiku (Jiku has no delete) | ↔ |
 | R9 | Attachments of descriptions and comments travel as files (see below) | ↔ |
 | R10 | A mapped repo that is public is reported on startup and by `check-config` | — |
+| T1 | With `tasks` on: every **public task** of a synced requirement creates a **sub-issue** of the requirement's issue, in the same repo. Tasks without a requirement, internal ones and those of an unsynced requirement never leave Jiku | Jiku → GitHub |
+| T2 | Every new **sub-issue** of a synced issue creates a **public task** of its requirement (not a requirement). Sub-issues of sub-issues are ignored | GitHub → Jiku |
+| T3 | Title, description, state, priority, comments and attachments of a task: as R5–R9 | ↔ |
+| T4 | The task's requirement and the sub-issue's parent: moving one moves the other; the latest change wins | ↔ |
+| T5 | A task that becomes internal or leaves the synced requirements stops syncing (note on the sub-issue); a sub-issue detached on GitHub stops syncing (internal note on the task, which stays where it is). Each is revived by the side that unlinked it | ↔ |
 
 States: `resuelto` / `cancelado` close the issue as `completed` / `not_planned`; the open states
 map to columns of the Project's Status field. Closing the issue of an `incidencia` resolves it in
@@ -36,6 +42,15 @@ last open state. A column with no mapping changes nothing in Jiku and leaves an 
 a column can be mapped to a state plus an internal comment (e.g. a "Blocked" column → `en_cola`).
 A card left without a column (e.g. after a Project's options were replaced) is put back where
 Jiku's state says.
+
+**Tasks** (`tasks: { enabled: true }` per project) have their own states: `finalizado` /
+`cancelado` close the sub-issue as `completed` / `not_planned`, and the open ones (`backlog`,
+`activo`, `en_revision`) map to Status columns through the preset's `taskStatus`. Without
+`taskStatus` the sub-issues are not added to the Project and only open/closed is synced. A
+sub-issue imported from GitHub becomes a task in `backlog`, with no responsible people.
+Responsible people, area and dates of a task are not synced. An issue that was already synced as
+a requirement and later becomes a sub-issue stays a requirement (Jiku cannot turn one into a
+task): an internal note says so, once.
 
 **Attachments.** A Jiku image (jpg, png, gif, webp) is uploaded to GitHub and embedded where the
 text referenced it. Other Jiku files (pdf, Office documents, txt, csv, svg) are named on GitHub —
@@ -80,6 +95,10 @@ or out-of-order triggers find nothing to do, and the connector's own writes neve
   (`<!-- jiku-github-sync:… -->`), the attribution link on everything it writes in Jiku, and a
   "pending" record before every creation, so a crash between creating something and storing its
   link never produces a duplicate.
+- **Sub-issues:** linking or unlinking one does not change either issue's `updated_at`, so the
+  poller also reads the parents of each repo's open issues (one GraphQL query per 100 issues, only
+  for projects with tasks) and syncs those whose parent changed; the `sub_issues` webhook does the
+  same at once. Who changed a parent, and when, is read from the issue's timeline.
 - **Who moved a card** is read from the issue's timeline (`ProjectV2ItemStatusChangedEvent`): a
   Project field value's `creator` does not change on later edits. Changes by
   `github-project-automation` are not taken as a person's decision.
@@ -133,7 +152,8 @@ The connector is meant to run as a long-lived container; nothing needs a command
 
 - **On start and on every reload of the mapping** it checks the mapping against GitHub (repos,
   fields, options, issue types) and logs the findings (`mapping check`, ERROR / WARN).
-- **Initial sync**, per project, from the mapping (`initialSync`):
+- **Initial sync**, per project, from the mapping (`initialSync`; the tasks' one is
+  `tasks.initialSync`, works the same and runs after it):
   - `plan` (default): the plan is logged one line per item (`initial sync plan: …`) with a
     summary (what is linked, created, skipped, comments, writes, estimate). Nothing is written.
   - `apply`: the plan is run once, in the same serial queue as the regular sync; when it ends
@@ -175,7 +195,9 @@ jiku-github-sync version
 
 - **`verify`**: read-only. For every linked pair it compares title, description, state and
   column, priority, type and that every comment has its copy on the other side, and it lists the
-  open public requirements and open issues that have no pair. Run it after `sync-inicial`, or
+  open public requirements and open issues that have no pair. With tasks on, it does the same for
+  task pairs (and the sub-issue's parent) and lists the open public tasks and sub-issues of synced
+  requirements that have no pair. Run it after `sync-inicial`, or
   whenever drift is suspected (exit 1 on differences).
 
 ## Running it
@@ -213,7 +235,7 @@ docker compose -f docker-compose.local.yml exec jiku-github-sync jiku-github-syn
   bodies and comments never go to the logs.
 - `/healthz` (process alive) and `/readyz` (bus connected and a recent successful GitHub poll).
 - `POST /webhooks/github` when `GITHUB_WEBHOOK_SECRET` is set (HMAC-verified; `issues`,
-  `issue_comment`, `projects_v2_item`). Webhooks are only hints: polling and reconciliation keep
+  `issue_comment`, `projects_v2_item`, `sub_issues`). Webhooks are only hints: polling and reconciliation keep
   running, because GitHub does not retry failed deliveries.
 
 ## Known limitations
@@ -238,7 +260,13 @@ docker compose -f docker-compose.local.yml exec jiku-github-sync jiku-github-syn
 - **Replacing a Project's options through the API** (`updateProjectV2Field`) gives every option a
   new id and empties every card; the connector puts linked cards back from Jiku, but cards of
   unlinked issues stay empty.
-- Project fields other than the mapped single-selects (Size, Iteration, dates, …) and sub-issues
+- Project fields other than the mapped single-selects (Size, Iteration, dates, …) are not synced.
+- **Sub-issues must be created as sub-issues.** GitHub's "Create sub-issue" creates the issue under
+  its parent at once. An issue created on its own and attached as a sub-issue later is imported as a
+  requirement if a poll sees it before it is attached (and then stays one).
+- **Sub-issues moved while closed** are noticed by the periodic reconciliation, not by the poller
+  (which sweeps open issues only).
+- Tasks without a requirement, a task's responsible people, area and dates, and nested sub-issues
   are not synced.
 
 ## Development

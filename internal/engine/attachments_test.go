@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gravadigital/jiku-github-sync/internal/github"
+	"github.com/gravadigital/jiku-github-sync/internal/jiku"
 	"github.com/gravadigital/jiku-github-sync/internal/text"
 )
 
@@ -76,7 +77,7 @@ func TestGitHubAttachmentsReachJiku(t *testing.T) {
 `+anim+`
 y [datos.pdf](https://github.com/user-attachments/files/9/datos.pdf)`)
 	h.syncReq(id)
-	jcs, _ := h.jk.ListComments(h.ctx, id)
+	jcs, _ := h.jk.ListComments(h.ctx, jiku.ReqRef(id))
 	m := jcs[len(jcs)-1]
 	if len(m.Attachments) != 1 || m.Attachments[0].FileName != "foto.png" {
 		t.Fatalf("the png becomes a file of the comment: %+v", m.Attachments)

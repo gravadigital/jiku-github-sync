@@ -72,3 +72,11 @@ func TestProjectItemAndIgnoredEvents(t *testing.T) {
 		t.Fatalf("only the issue item should queue: %+v", got)
 	}
 }
+
+func TestSubIssuesEvent(t *testing.T) {
+	body := `{"action":"sub_issue_added","sub_issue":{"number":12},"sub_issue_repo":{"full_name":"acme/web"},"parent_issue":{"number":3},"repository":{"full_name":"acme/api"}}`
+	tr, ok, err := Parse("sub_issues", []byte(body))
+	if err != nil || !ok || tr.Repo != "acme/web" || tr.Number != 12 {
+		t.Fatalf("the sub-issue (in its own repo) must be queued: %+v %v %v", tr, ok, err)
+	}
+}

@@ -109,6 +109,31 @@ func Parse(event string, body []byte) (Trigger, bool, error) {
 			return Trigger{}, false, nil
 		}
 		return Trigger{Repo: p.Repository.FullName, Number: p.Issue.Number}, true, nil
+	case "sub_issues":
+		// A sub-issue linked to or unlinked from a parent: neither issue's updated_at changes, so
+		// this (or the poller's sweep of parents) is the only way to see it.
+		var p struct {
+			SubIssue struct {
+				Number int `json:"number"`
+			} `json:"sub_issue"`
+			SubIssueRepo *struct {
+				FullName string `json:"full_name"`
+			} `json:"sub_issue_repo"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+		}
+		if err := json.Unmarshal(body, &p); err != nil {
+			return Trigger{}, false, err
+		}
+		repo := p.Repository.FullName
+		if p.SubIssueRepo != nil && p.SubIssueRepo.FullName != "" {
+			repo = p.SubIssueRepo.FullName
+		}
+		if p.SubIssue.Number == 0 || repo == "" {
+			return Trigger{}, false, nil
+		}
+		return Trigger{Repo: repo, Number: p.SubIssue.Number}, true, nil
 	case "projects_v2_item":
 		var p struct {
 			ProjectsV2Item struct {

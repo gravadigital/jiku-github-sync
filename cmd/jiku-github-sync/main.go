@@ -113,6 +113,12 @@ func newCredentials(cfg config.Config, m *mapping.File, log *slog.Logger) (*cred
 }
 
 // logIdentities says which GitHub identity each credential acts as.
+// resolveProjects turns the Projects named by owner/number into node ids, each with its
+// project's credentials. prev is the mapping in use (nil on start): what did not change keeps its id.
+func resolveProjects(ctx context.Context, reg *creds.Registry, m, prev *mapping.File) error {
+	return m.ResolveProjects(ctx, prev, func(p *mapping.Project) mapping.ProjectFinder { return reg.For(m, p) })
+}
+
 func logIdentities(ctx context.Context, reg *creds.Registry, log *slog.Logger) error {
 	var errs []error
 	reg.Each(func(name string, c *github.Client) {
@@ -225,6 +231,9 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err := logIdentities(ctx, reg, log); err != nil {
 		return err
 	}
+	if err := resolveProjects(ctx, reg, m, nil); err != nil {
+		return err
+	}
 
 	h := health.New()
 	mux := h.Mux()
@@ -262,6 +271,9 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		GitHubFor: func(p *mapping.Project) worker.GitHub { return reg.For(eng.Config(), p) },
 		OnReload: func(f *mapping.File) error {
 			if err := reg.Load(f); err != nil {
+				return err
+			}
+			if err := resolveProjects(ctx, reg, f, eng.Config()); err != nil {
 				return err
 			}
 			warnMixedClients(ctx, c, f, log)
@@ -316,6 +328,9 @@ func checkConfig(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	}
 	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
+		return err
+	}
+	if err := resolveProjects(ctx, reg, m, nil); err != nil {
 		return err
 	}
 	var only int64
@@ -374,6 +389,9 @@ func syncInicial(ctx context.Context, cfg config.Config, log *slog.Logger, args 
 	if err != nil {
 		return err
 	}
+	if err := resolveProjects(ctx, reg, m, nil); err != nil {
+		return err
+	}
 	gh := reg.For(m, p)
 	c, err := connect(ctx, cfg, log)
 	if err != nil {
@@ -421,6 +439,9 @@ func verifyCmd(ctx context.Context, cfg config.Config, log *slog.Logger, args []
 	}
 	reg, err := newCredentials(cfg, m, log)
 	if err != nil {
+		return err
+	}
+	if err := resolveProjects(ctx, reg, m, nil); err != nil {
 		return err
 	}
 	gh := reg.For(m, p)

@@ -76,9 +76,10 @@ type Project struct {
 	// DefaultRepo is where the issues of requirements born in Jiku are created. It must be one of
 	// Repos.
 	DefaultRepo string `yaml:"defaultRepo"`
-	// GithubProject is the node id of the Project v2 the Status (and the other fields) come from.
-	// Optional: without it only open/closed is synced.
-	GithubProject string `yaml:"githubProject"`
+	// GithubProjectRef is the Project v2 the Status (and the other fields) come from, as written
+	// in the file: "owner/number", the Project's URL or its node id. Optional: without it only
+	// open/closed is synced.
+	GithubProjectRef string `yaml:"githubProject"`
 	// Credentials names an entry of File.Credentials: the client's GitHub credentials.
 	Credentials string `yaml:"credentials"`
 	// FieldMapping names a preset of File.FieldMappings. Ignored without GithubProject, except
@@ -94,6 +95,11 @@ type Project struct {
 
 	// Fields is the resolved preset (nil when none). Filled by Load.
 	Fields *FieldMapping `yaml:"-"`
+	// GithubProject is the node id of GithubProjectRef: filled by Load when the reference is a
+	// node id, by ResolveProjects otherwise. Empty when the project has no GitHub Project.
+	GithubProject string `yaml:"-"`
+	// projectRef is GithubProjectRef parsed. Filled by Load.
+	projectRef ProjectRef
 }
 
 // TasksConfig is the sync of tasks with sub-issues: a public task of a synced requirement is a
@@ -311,6 +317,20 @@ func (f *File) validate() error {
 			default:
 				errs = append(errs, fmt.Errorf("%s.tasks.initialSync: %q is not plan, apply or off", at, p.Tasks.InitialSync))
 			}
+		}
+		if p.GithubProjectRef != "" {
+			ref, err := ParseProjectRef(p.GithubProjectRef)
+			switch {
+			case err != nil:
+				errs = append(errs, fmt.Errorf("%s.githubProject: %w", at, err))
+			case ref.NodeID != "":
+				p.GithubProject = ref.NodeID
+			default:
+				if c := f.Credentials[p.Credentials]; c != nil && c.App != nil && !strings.EqualFold(ref.Owner, Owner(p.DefaultRepo)) {
+					errs = append(errs, fmt.Errorf("%s.githubProject: with a GitHub App credential the Project must be in %s, not %s", at, Owner(p.DefaultRepo), ref.Owner))
+				}
+			}
+			p.projectRef = ref
 		}
 		if p.FieldMapping != "" {
 			fm, ok := f.FieldMappings[p.FieldMapping]

@@ -156,7 +156,7 @@ func (w *Worker) startProjects(ctx context.Context) {
 			w.log.Error("project state", "project", p.JikuProject, "error", err)
 			continue
 		}
-		w.log.Info("watching project", "project", p.JikuProject, "repos", p.Repos, "githubProject", p.GithubProject, "since", started)
+		w.log.Info("watching project", "project", p.JikuProject, "repos", p.Repos, "githubProject", p.GithubProjectRef, "githubProjectId", p.GithubProject, "since", started)
 		for _, r := range p.Repos {
 			repo, err := w.o.GitHubFor(p).GetRepo(ctx, r)
 			if err != nil {
@@ -574,7 +574,7 @@ func (w *Worker) reloadLoop(ctx context.Context) {
 		}
 		if w.o.OnReload != nil {
 			if err := w.o.OnReload(f); err != nil {
-				w.log.Error("mapping changed but its credentials cannot be loaded: keeping the previous mapping", "error", err)
+				w.log.Error("mapping changed but cannot be applied (credentials, or its GitHub Projects cannot be resolved): keeping the previous mapping", "error", err)
 				continue
 			}
 		}

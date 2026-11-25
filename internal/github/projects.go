@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -256,4 +257,24 @@ func (c *Client) LastStatusChange(ctx context.Context, issueNodeID, projectID st
 		return sc, nil
 	}
 	return nil, nil
+}
+
+// ProjectNodeID returns the node id of the Project v2 number of an organization or a user (what
+// the Project's page shows: github.com/orgs/<owner>/projects/<number>).
+func (c *Client) ProjectNodeID(ctx context.Context, owner string, number int) (string, error) {
+	var out struct {
+		Owner *struct {
+			Project *struct {
+				ID string `json:"id"`
+			} `json:"projectV2"`
+		} `json:"repositoryOwner"`
+	}
+	q := `query($o:String!,$n:Int!){repositoryOwner(login:$o){... on ProjectV2Owner{projectV2(number:$n){id}}}}`
+	if err := c.graphql(ctx, q, map[string]any{"o": owner, "n": number}, &out, false); err != nil {
+		return "", err
+	}
+	if out.Owner == nil || out.Owner.Project == nil || out.Owner.Project.ID == "" {
+		return "", &APIError{Status: 404, Method: "POST", Path: "/graphql", Message: fmt.Sprintf("project %s/%d", owner, number)}
+	}
+	return out.Owner.Project.ID, nil
 }

@@ -109,16 +109,20 @@ func project(ctx context.Context, gh GitHub, p *mapping.Project) []Finding {
 		}
 	}
 
-	if p.GithubProject == "" {
+	if p.GithubProjectRef == "" {
 		add(Warn, "sin githubProject: solo se sincroniza abierto/cerrado")
+		return out
+	}
+	if p.GithubProject == "" {
+		add(Error, "Project %s: no se resolvió su id", p.GithubProjectRef)
 		return out
 	}
 	s, err := gh.ProjectSchema(ctx, p.GithubProject)
 	if err != nil {
-		add(Error, "Project %s: %v", p.GithubProject, err)
+		add(Error, "Project %s: %v", p.GithubProjectRef, err)
 		return out
 	}
-	add(OK, "Project %q", s.Title)
+	add(OK, "Project %q (%s)", s.Title, p.GithubProject)
 	if fm == nil {
 		add(Warn, "sin fieldMapping: el Project solo recibe los issues, sin estado ni prioridad")
 		return out

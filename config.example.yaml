@@ -92,7 +92,13 @@ projects:
     credentials: client-a                       # its client's GitHub credentials
     repos: [acme-org/example-api, acme-org/example-web]   # new issues of these become requirements
     defaultRepo: acme-org/example-api           # issues of requirements born in Jiku go here
-    githubProject: PVT_xxxxxxxxxxxxxxxx         # Project v2 node id (optional: without it, open/closed only)
+    # The Project v2 (optional: without it, open/closed only), as its page shows it:
+    #   acme-org/12                                    owner/number
+    #   https://github.com/orgs/acme-org/projects/12   the Project's URL (users/<login>/... too)
+    #   PVT_xxxxxxxxxxxxxxxx                           its node id
+    # owner/number and the URL are turned into the node id on start and on every reload, with the
+    # project's credentials (which must be able to see the Project).
+    githubProject: acme-org/12
     fieldMapping: kanban-example
     # What already existed when the project was mapped (open items, with their comments):
     #   plan  (default) the service logs the plan and writes nothing

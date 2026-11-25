@@ -171,3 +171,29 @@ func TestItemsAndStatusChange(t *testing.T) {
 		t.Fatalf("status change %+v err %v (other projects are ignored)", sc, err)
 	}
 }
+
+func TestProjectNodeID(t *testing.T) {
+	c := newTest(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch {
+		case body.Variables["o"] == "acme-org" && body.Variables["n"] == float64(12):
+			fmt.Fprint(w, `{"data":{"repositoryOwner":{"projectV2":{"id":"PVT_12"}}}}`)
+		case body.Variables["o"] == "acme-org":
+			fmt.Fprint(w, `{"data":{"repositoryOwner":{"projectV2":null}},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a ProjectV2 with the number 99."}]}`)
+		default:
+			fmt.Fprint(w, `{"data":{"repositoryOwner":null}}`)
+		}
+	})
+	if id, err := c.ProjectNodeID(context.Background(), "acme-org", 12); err != nil || id != "PVT_12" {
+		t.Fatalf("got %q %v", id, err)
+	}
+	if _, err := c.ProjectNodeID(context.Background(), "acme-org", 99); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing number: %v", err)
+	}
+	if _, err := c.ProjectNodeID(context.Background(), "nobody", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing owner: %v", err)
+	}
+}

@@ -29,6 +29,17 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 
+### Added
+
+- **`githubProject` accepts what the Project's page shows.** Besides the node id (`PVT_…`, which
+  only the API or `gh` gave), it now takes `owner/number` (`acme-org/12`) or the Project's URL
+  (`https://github.com/orgs/acme-org/projects/12`, `users/<login>/…` too). The connector looks the
+  node id up with the project's own credentials on start and on every reload; an unchanged reference
+  is not looked up again on a reload. If it cannot be found (wrong number, or the credentials do not
+  see it), the service does not start, and a reload keeps the previous mapping and logs why. With a
+  GitHub App credential the Project's owner must be the organization of the project's repos.
+  Existing mappings with a node id keep working unchanged.
+
 ## [1.1.0] - 2026-11-17
 
 Tasks of the requirements, synced with sub-issues of their issues. Off until a project turns it on:

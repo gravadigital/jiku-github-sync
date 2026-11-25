@@ -142,9 +142,13 @@ projects:
   - jikuProject: 123
     repos: [acme-org/example-api, acme-org/example-web]
     defaultRepo: acme-org/example-api
-    githubProject: PVT_xxxxxxxx     # optional: without it only open/closed is synced
+    githubProject: acme-org/12      # optional: without it only open/closed is synced
     fieldMapping: my-board
 ```
+
+`githubProject` is the Project as its page shows it: `owner/number` (`acme-org/12`), its URL
+(`https://github.com/orgs/acme-org/projects/12`), or its node id (`PVT_…`). The connector looks the
+node id up with the project's credentials on start and on every reload of the mapping.
 
 ## Running as a service
 

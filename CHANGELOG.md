@@ -29,6 +29,11 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-25
+
+The GitHub Project of a mapped project can be named as its page shows it. An installation upgraded
+from 1.1.0 keeps working exactly as before, with the same mapping and state.
+
 ### Added
 
 - **`githubProject` accepts what the Project's page shows.** Besides the node id (`PVT_…`, which
@@ -39,6 +44,15 @@ for agents is in [CLAUDE.md](CLAUDE.md#cutting-a-release).
   see it), the service does not start, and a reload keeps the previous mapping and logs why. With a
   GitHub App credential the Project's owner must be the organization of the project's repos.
   Existing mappings with a node id keep working unchanged.
+
+### Notes for existing installations
+
+- Nothing to do: a `githubProject` written as a node id is used as before, without asking GitHub.
+- To switch to `owner/number` or the URL, the project's credentials must be able to read the Project
+  (they already need it to sync its fields). The change is picked up by a reload, without a restart.
+- With a GitHub App credential, an `owner/number` or URL whose owner is not the organization of the
+  project's repos is now rejected when the mapping is loaded (an installation token could never reach
+  it anyway).
 
 ## [1.1.0] - 2026-11-17
 
